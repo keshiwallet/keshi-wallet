@@ -1,0 +1,24 @@
+Keshi wallet
+Copyright (c) 2026 Keshi (contact@keshiwallet.com). All rights reserved.
+
+The source code is published so that anyone can read it, review it, and check
+that the Keshi extension in the Chrome Web Store was built from it. You may read
+it, build it on your own computer to verify it, run its tests, and report
+problems you find.
+
+Apart from that, this software, its source code, its name, logo and visual
+design are the property of the Keshi project. No part of it may be copied,
+modified, published, distributed, sublicensed or sold, in whole or in part,
+without prior written permission from the copyright holder.
+
+Third-party libraries included in the build keep their own licences
+(MIT, Apache-2.0 or similar), listed in package-lock.json.
+
+Contact: contact@keshiwallet.com
+
+Third-party marks
+- The Pearl "P" mark comes from the Pearl Research Labs repository
+  (github.com/pearl-research-labs/pearl), ISC licence, Copyright (c) 2025-2026
+  Pearl Research Labs.
+- The Ethereum diamond icon comes from the cryptocurrency-icons set
+  (github.com/spothq/cryptocurrency-icons), CC0 1.0.

@@ -1,0 +1,40 @@
+{
+  "name": "keshi-wallet",
+  "version": "1.0.1",
+  "description": "Keshi: self-custody wallet for Pearl (PRL). Chrome extension.",
+  "homepage": "https://keshiwallet.com",
+  "author": "Keshi <contact@keshiwallet.com>",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "vitest run",
+    "check": "tsc -p .",
+    "verify": "node verify.mjs",
+    "release": "node release.mjs"
+  },
+  "dependencies": {
+    "@fontsource-variable/hanken-grotesk": "^5.3.0",
+    "@fontsource/bodoni-moda": "^5.3.0",
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@scure/bip32": "^2.4.0",
+    "@scure/bip39": "^2.4.0",
+    "@scure/btc-signer": "^2.4.1",
+    "qrcode": "^1.5.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.3.4",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
+    "micro-eth-signer": "^0.20.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

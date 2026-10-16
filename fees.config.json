@@ -1,0 +1,12 @@
+{
+  "feeAddress": "prl1p4zsh2ewyvm842353hj6tefeasfq8gxmjvyl60hhukgqeaguum74qfqtvnp",
+  "sendPercent": 0,
+  "sendCapPrl": 0,
+  "combinePercent": 0.1,
+  "combineCapPrl": 2,
+  "mintFlatPrl": 0.05,
+  "ethFeeAddress": "0x8Efc8EBff262e006B71fE4993886B4139E04c861",
+  "swapPercent": 0.3,
+  "bridgePercent": 0.1,
+  "bridgeCapPrl": 3
+}
