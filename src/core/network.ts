@@ -36,3 +36,17 @@ export const MIN_FEE_RATE = 1; // grains per vbyte (node relay minimum)
 export function btcNet(net: Network) {
   return { bech32: net.hrp, pubKeyHash: 0x00, scriptHash: 0x05, wif: 0x80 };
 }
+
+/**
+ * A message that came from a remote service, made safe to show: named after
+ * the service, kept short, and with any web address removed, so that a
+ * compromised server cannot plant "visit this site" in Keshi's own error text.
+ */
+export function remoteText(service: string, text: unknown, fallback = "refused the request"): string {
+  const raw = String(text ?? "")
+    .replace(/https?:\/\/\S+|www\.\S+/gi, "[link removed]")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .trim();
+  const short = raw.length > 160 ? raw.slice(0, 157) + "…" : raw;
+  return `${service} says: ${short || fallback}`;
+}

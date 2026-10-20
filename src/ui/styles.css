@@ -502,3 +502,8 @@ h4.group { margin: 10px 0 0; font-size: 12.5px; font-weight: 600; }
 .thumb.big { width: 64px; height: 64px; flex: 0 0 64px; border-radius: 12px; object-fit: cover; background: var(--shell); border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-weight: 600; color: var(--grit); }
 .transfer-card .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .center { text-align: center; }
+
+/* ---- 1.0.2: accounts of a phrase, removing a wallet ---- */
+.wallet-actions { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.wallet-actions .link { width: auto; display: inline-block; padding: 2px 0; font-size: 13px; color: var(--grit); text-align: left; }
+.wallet-actions .link:hover { color: var(--ink); }

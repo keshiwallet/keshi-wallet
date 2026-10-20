@@ -1,5 +1,6 @@
 import { keccak_256 } from "@noble/hashes/sha3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { remoteText } from "./network";
 
 // PearlBridge: moves PRL to Ethereum as wPRL (an ERC-20 token) and back.
 // Keshi only uses its public, read-only API (api.pearlbridge.xyz/v1). The
@@ -63,7 +64,7 @@ export class Bridge {
 
   async quote(amount: bigint): Promise<BridgeQuote> {
     const [q, s] = await Promise.all([this.get(`/quote/mint?amountGrains=${amount}`), this.get("/status")]);
-    if (q.error) throw new Error(String(q.error));
+    if (q.error) throw new Error(remoteText("PearlBridge", q.error));
     if (String(s.contracts?.wprl).toLowerCase() !== WPRL_CONTRACT.toLowerCase())
       throw new Error("The bridge reports an unexpected wPRL contract. Nothing was sent.");
     return {
@@ -82,7 +83,7 @@ export class Bridge {
   async depositAddress(eth: string): Promise<string> {
     if (!isEthAddress(eth)) throw new Error("That is not a valid Ethereum address");
     const j = await this.get(`/deposit-address?ethAddress=${eth}`);
-    if (j.error) throw new Error(String(j.error));
+    if (j.error) throw new Error(remoteText("PearlBridge", j.error));
     if (typeof j.pearlAddress !== "string" || String(j.ethAddress).toLowerCase() !== eth.toLowerCase())
       throw new Error("The bridge sent an unreadable answer");
     return j.pearlAddress;
@@ -91,7 +92,7 @@ export class Bridge {
   /** Quote for sending wPRL back to PRL. Checks that the bridge names the contracts Keshi expects. */
   async quoteBack(amount: bigint, pearlAddress: string): Promise<{ amount: bigint; fee: bigint; net: bigint; paused: boolean; withinDailyCap: boolean }> {
     const q = await this.get(`/quote/burn?amountGrains=${amount}&pearlAddress=${encodeURIComponent(pearlAddress)}`);
-    if (q.error) throw new Error(String(q.error));
+    if (q.error) throw new Error(remoteText("PearlBridge", q.error));
     if (q.addressCheck && q.addressCheck.valid !== true) throw new Error("The bridge does not accept this PRL address");
     const steps = q.transaction?.steps ?? [];
     const same = (a: unknown, b: string) => String(a).toLowerCase() === b.toLowerCase();

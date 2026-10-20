@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Keshi Wallet",
   "short_name": "Keshi",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Everything you do with Pearl (PRL) in one place: send, swap, bridge and mint in a few clicks. Your keys stay in your hands.",
   "icons": {
     "16": "icon/16.png",

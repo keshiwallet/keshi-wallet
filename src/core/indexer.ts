@@ -1,5 +1,5 @@
 import { MAX_FEE_RATE } from "./send";
-import { COINBASE_MATURITY, type Network } from "./network";
+import { COINBASE_MATURITY, remoteText, type Network } from "./network";
 
 // Client for Pearl's public Blockbook indexer. Looks addresses up one by one
 // (never sends an extended public key, which would link the whole wallet).
@@ -49,7 +49,7 @@ export class Indexer {
           continue;
         }
         const json = await res.json();
-        if (json && typeof json.error === "string") throw new Error(json.error);
+        if (json && typeof json.error === "string") throw new Error(remoteText("The Pearl indexer", json.error));
         if (!res.ok) throw new Error(`Indexer error ${res.status}`);
         return json;
       } catch (e) {
@@ -124,7 +124,7 @@ export class Indexer {
     if (res.ok && typeof j.result === "string" && /^[0-9a-fA-F]{64}$/.test(j.result)) return j.result;
     const reason = j.error?.message ?? j.error;
     // A clear "no" from the node (a 4xx answer with its reason): the transaction did not go out.
-    if (res.status >= 400 && res.status < 500 && res.status !== 429 && typeof reason === "string") throw new Rejected(reason.slice(0, 200));
+    if (res.status >= 400 && res.status < 500 && res.status !== 429 && typeof reason === "string") throw new Rejected(remoteText("The Pearl network", reason));
     // Anything else (gateway error, overload, unreadable answer) says nothing about whether it went out.
     throw new Error("The network did not give a clear answer");
   }

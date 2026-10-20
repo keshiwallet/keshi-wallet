@@ -22,6 +22,12 @@ export interface WalletEntry {
   key?: string;
   /** How addresses come out of the phrase (see keys.ts). Absent in wallets made before 0.27: they used "standard". */
   derivation?: "pearl" | "standard";
+  /**
+   * Account number of the phrase (m/86'/coin'/account'), as the official Pearl
+   * wallet numbers its accounts. Absent means 0, the first account. Several
+   * entries may share one phrase with different account numbers.
+   */
+  account?: number;
 }
 
 export interface Secrets {
@@ -31,6 +37,8 @@ export interface Secrets {
   key?: string;
   /** Derivation of the wallet in use. */
   derivation?: "pearl" | "standard";
+  /** Account number of the wallet in use (see WalletEntry.account). */
+  account?: number;
   /** Every wallet kept in this vault. Absent in vaults made before several wallets were supported. */
   wallets?: WalletEntry[];
   /** Key (hex) that encrypts the rest of the wallet's local data. */
@@ -58,8 +66,9 @@ export async function lockVault(secrets: Secrets, password: string, n = N): Prom
 }
 
 export async function openVault(file: VaultFile, password: string): Promise<Secrets> {
-  // A tampered vault file must not be able to ask for gigabytes of memory.
-  if (!Number.isInteger(file.n) || file.n < 2 || file.n > 2 ** 20) throw new Error("This wallet file is damaged.");
+  // Only the work factors Keshi has ever written are accepted (2^17 today, 2^10 in tests):
+  // a tampered file must not be able to ask for a gigabyte of memory and freeze the browser.
+  if (!Number.isInteger(file.n) || ![2 ** 10, 2 ** 14, 2 ** 15, 2 ** 16, 2 ** 17].includes(file.n)) throw new Error("This wallet file is damaged.");
   const key = await keyFor(password, hexToBytes(file.salt), file.n);
   try {
     const plain = xchacha20poly1305(key, hexToBytes(file.nonce)).decrypt(hexToBytes(file.data));

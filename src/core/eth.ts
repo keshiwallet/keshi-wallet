@@ -4,6 +4,7 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { keccak_256 } from "@noble/hashes/sha3.js";
 import { bytesToHex, concatBytes, hexToBytes } from "@noble/hashes/utils.js";
 import { cleanPhrase } from "./keys";
+import { remoteText } from "./network";
 
 // The small part of Ethereum that Keshi needs to hold wPRL and send it back
 // through the bridge: one account from the same recovery phrase, token
@@ -32,9 +33,13 @@ export function addressFromPrivateKey(priv: Uint8Array): string {
   return checksumAddress(bytesToHex(keccak_256(pub).slice(12)));
 }
 
-/** Standard Ethereum account (m/44'/60'/0'/0/0): the same one MetaMask shows for this phrase. */
-export function ethAccountFromPhrase(phrase: string): EthAccount {
-  const node = HDKey.fromMasterSeed(mnemonicToSeedSync(cleanPhrase(phrase), "")).derive("m/44'/60'/0'/0/0");
+/**
+ * Standard Ethereum account m/44'/60'/0'/0/n: for account 0 the same one MetaMask
+ * shows first for this phrase, and for account n its "Account n+1".
+ */
+export function ethAccountFromPhrase(phrase: string, account = 0): EthAccount {
+  if (!Number.isInteger(account) || account < 0 || account >= 0x80000000) throw new Error("Invalid account number");
+  const node = HDKey.fromMasterSeed(mnemonicToSeedSync(cleanPhrase(phrase), "")).derive(`m/44'/60'/0'/0/${account}`);
   const privateKey = node.privateKey!;
   return { address: addressFromPrivateKey(privateKey), privateKey };
 }
@@ -132,7 +137,9 @@ export class EthRpc {
       try {
         const res = await this.fetcher(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
         const j = await res.json();
-        if (j.error) throw new Error(String(j.error.message ?? "Ethereum refused the request"));
+        if (j && j.error) throw new Error(remoteText("Ethereum", j.error.message));
+        // Only a well-formed answer to this very request counts: a gateway error page or a half answer must not pass for a result.
+        if (!res.ok || !j || typeof j !== "object" || String(j.id) !== "1" || !("result" in j)) throw new Error("Ethereum server gave an unreadable answer");
         return j.result;
       } catch (e) {
         last = e;
@@ -168,7 +175,7 @@ export class EthRpc {
     const answers = await Promise.allSettled(
       this.urls.map(async (url) => {
         const j = await (await this.fetcher(url, { method: "POST", headers: { "content-type": "application/json" }, body })).json();
-        if (j.error) throw new Error(String(j.error.message ?? "refused"));
+        if (j.error) throw new Error(remoteText("Ethereum", j.error.message));
         return String(j.result ?? "0x");
       }),
     );
@@ -223,7 +230,10 @@ export class EthRpc {
    */
   async send(raw: string, hash?: string): Promise<string> {
     try {
-      const answered = String(await this.call("eth_sendRawTransaction", [raw]));
+      const answered = String(await this.call("eth_sendRawTransaction", [raw])).toLowerCase();
+      // "Sent" means the network named this transaction back: a null or odd answer is not an acceptance.
+      if (!/^0x[0-9a-f]{64}$/.test(answered)) throw new Error("Ethereum server gave an unreadable answer");
+      if (hash && answered !== hash.toLowerCase()) throw new Error("Ethereum server named a different transaction");
       return hash ?? answered;
     } catch (e) {
       if (hash && e instanceof Error && /already known|known transaction|already imported/i.test(e.message)) return hash;

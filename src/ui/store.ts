@@ -1,5 +1,5 @@
 import * as core from "../core";
-import { local, session, getSettings, setDataKey, newDataKey, label, type Settings } from "../ext/platform";
+import { local, session, getSettings, setDataKey, newDataKey, label, type Settings, type Site } from "../ext/platform";
 
 // Everything the screens need from the wallet engine, in one place.
 
@@ -12,11 +12,26 @@ export async function hasWallet(): Promise<boolean> {
   return !!(await local.get("vault"));
 }
 
-export async function createWallet(phrase: string, password: string): Promise<core.Secrets> {
-  if (await hasWallet()) throw new Error("A wallet already exists on this device");
+/**
+ * Every entry a phrase brings in: its first account, then the accounts it has
+ * already used on the Pearl network when `restoring` (an account other wallets
+ * created and paid to, which would otherwise stay invisible). `found` lists the
+ * numbers of those accounts; null when the network could not be asked.
+ */
+export async function phraseEntries(name: string, phrase: string, restoring: boolean): Promise<{ entries: core.WalletEntry[]; found: number[] | null }> {
   const clean = core.cleanPhrase(phrase);
   const derivation = await core.resolveDerivation(clean);
-  const secrets: core.Secrets = { phrase: clean, derivation, wallets: [{ name: "Wallet 1", phrase: clean, derivation }], dataKey: newDataKey() };
+  const entries: core.WalletEntry[] = [{ name, phrase: clean, derivation }];
+  const found = restoring ? await core.usedAccounts(clean, derivation) : [];
+  for (const account of found ?? []) entries.push({ name: `${name} · Account ${account + 1}`, phrase: clean, derivation, account });
+  return { entries, found };
+}
+
+export async function createWallet(phrase: string, password: string, restoring = false): Promise<core.Secrets> {
+  if (await hasWallet()) throw new Error("A wallet already exists on this device");
+  const { entries } = await phraseEntries("Wallet 1", phrase, restoring);
+  const first = entries[0]!;
+  const secrets: core.Secrets = { phrase: first.phrase!, derivation: first.derivation, wallets: entries, dataKey: newDataKey() };
   await local.set("vault", await core.lockVault(secrets, password));
   await remember(secrets);
   return secrets;
@@ -107,7 +122,8 @@ export async function unlock(password: string, code = ""): Promise<core.Secrets>
 
 /* Wallet names the user chose. Kept encrypted next to the vault, so that a
    rename needs no password; they are also written into the vault the next
-   time it is saved. Wallets are only ever added, so the index is stable. */
+   time it is saved. The index is stable except when a wallet is removed, and
+   removeWallet rewrites this list then. */
 const NAMES = "walletNames";
 
 async function withNames(s: core.Secrets): Promise<core.Secrets> {
@@ -191,10 +207,17 @@ export async function loadCached(secrets: core.Secrets, net: core.Network): Prom
   return local.get<core.Snapshot>(snapKey(secrets, net));
 }
 
+/** Thrown when the indexer says it is behind the chain: its figures would be incomplete, not wrong, so the last snapshot stays on screen. */
+export class IndexerBehind extends Error {}
+
 export async function refresh(secrets: core.Secrets, net: core.Network): Promise<core.Snapshot> {
   const account = core.accountOf(secrets, net);
   const pq = await quantumAddress(secrets, net);
-  const snap = await core.scan(account, new core.Indexer(net), pq ? [{ address: pq.address, change: false, index: 0, tapRoot: pq.merkleRoot }] : []);
+  const indexer = new core.Indexer(net);
+  // An indexer that says it is still catching up would show an incomplete wallet: keep the last complete picture instead.
+  const status = await indexer.status().catch(() => null);
+  if (status && !status.inSync) throw new IndexerBehind("The Pearl indexer is still catching up with the network. Showing the last figures Keshi read; try again in a few minutes.");
+  const snap = await core.scan(account, indexer, pq ? [{ address: pq.address, change: false, index: 0, tapRoot: pq.merkleRoot }] : []);
   // Mark coins that carry tokens or inscriptions so they are never spent as money.
   const mine = (await local.get<string[]>("inscriptions:" + net.id)) ?? [];
   snap.protectedOutpoints = [...mine];
@@ -207,7 +230,13 @@ export async function refresh(secrets: core.Secrets, net: core.Network): Promise
       snap.protectedOutpoints.push(...lists.flat());
       snap.protectionChecked = true;
     } catch {
-      /* fallback rule in core.spendable still protects small coins */
+      // The index did not answer. Keep what it said last time about the coins that
+      // are still here, rather than starting from nothing: a coin known to carry
+      // a token stays protected. The fallback rule in core.spendable still
+      // protects small coins, and the user is told the check is incomplete.
+      const previous = await loadCached(secrets, net).catch(() => undefined);
+      const still = new Set(snap.utxos.map((u) => `${u.txid}:${u.vout}`));
+      for (const o of previous?.protectedOutpoints ?? []) if (still.has(o) && !snap.protectedOutpoints.includes(o)) snap.protectedOutpoints.push(o);
     }
   }
   await local.set(snapKey(secrets, net), snap);
@@ -255,7 +284,7 @@ export async function createQuantumAddress(secrets: core.Secrets, net: core.Netw
   if (existing) return existing;
   const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
   const internal = core.accountOf(secrets, net).derive(false, 0).pubkey;
-  const pq = core.derivePqAddress(secrets.phrase, internal, net, false, 0, secrets.derivation ?? "standard");
+  const pq = core.derivePqAddress(secrets.phrase, internal, net, false, 0, secrets.derivation ?? "standard", core.accountNumber(secrets));
   const stored: StoredPq = { address: pq.address, leafScript: hex(pq.leafScript), merkleRoot: hex(pq.merkleRoot), controlBlock: hex(pq.controlBlock), xmssPublicKey: hex(pq.xmssPublicKey) };
   await local.set(pqKey(secrets, net), stored);
   return stored;
@@ -381,7 +410,8 @@ export async function tokenHolders(secrets: core.Secrets, net: core.Network, sna
   if (!known.has(first.address)) known.set(first.address, { address: first.address, change: false, index: 0, used: true });
   const list = [...known.values()].filter((a) => a.used || a.address === first.address).slice(0, 30);
   const idx = new core.TokenIndex();
-  const amounts = await Promise.all(list.map((a) => idx.balances(a.address).then((b) => BigInt(b[ticker.toLowerCase()] ?? "0")).catch(() => 0n)));
+  // Every address must answer: an address read as "0" by mistake would hide tokens from the transfer, or pick the wrong coins.
+  const amounts = await Promise.all(list.map((a) => idx.balances(a.address).then((b) => BigInt(b[ticker.toLowerCase()] ?? "0"))));
   return list.map((a, i) => ({ address: a.address, change: a.change, index: a.index, amount: amounts[i]! })).filter((h) => h.amount > 0n).sort((a, b) => (b.amount > a.amount ? 1 : -1));
 }
 
@@ -669,7 +699,7 @@ export async function inscriptions(secrets: core.Secrets, net: core.Network, sna
   const first = core.accountOf(secrets, net).derive(false, 0).address;
   const addrs = [...new Set([first, ...(snap?.addresses.filter((a) => a.used).map((a) => a.address) ?? [])])].slice(0, 30);
   const idx = new core.TokenIndex();
-  const lists = await Promise.all(addrs.map((a) => idx.inscriptions(a).catch(() => [] as core.Inscription[])));
+  const lists = await Promise.all(addrs.map((a) => idx.inscriptions(a))); // an address that cannot be read fails the whole list: "none" must not mean "unknown"
   const seen = new Set<string>();
   return lists
     .flat()
@@ -702,7 +732,7 @@ export async function ethHoldings(secrets: core.Secrets): Promise<EthHoldings> {
     rpc.ethBalance(address),
     rpc.tokenBalance(core.WPRL_CONTRACT, address),
     rpc.tokenBalance(core.USDT, address),
-    rpc.tokenBalance(core.WETH, address).catch(() => 0n),
+    rpc.tokenBalance(core.WETH, address),
   ]);
   return { address, eth, wprl, usdt, weth };
 }
@@ -796,10 +826,57 @@ export async function ownTxids(net: core.Network): Promise<Set<string>> {
   return new Set(((await local.get<string[]>("inscriptions:" + net.id)) ?? []).map((o) => o.split(":")[0]!));
 }
 
-/** Add a wallet to the vault. Needs the wallet password, because the vault is re-encrypted. */
-export async function importWallet(secrets: core.Secrets, entry: core.WalletEntry, password: string): Promise<core.Secrets> {
+/** Add one or more wallets to the vault. Needs the wallet password, because the vault is re-encrypted. */
+export async function importWallet(secrets: core.Secrets, entries: core.WalletEntry | core.WalletEntry[], password: string): Promise<core.Secrets> {
   void secrets;
-  return saveSecrets((stored) => core.addWallet(stored, entry), password);
+  const list = Array.isArray(entries) ? entries : [entries];
+  return saveSecrets((stored) => list.reduce((s, e) => core.addWallet(s, e), stored), password);
+}
+
+/** Add the next account of the recovery phrase of wallet `index`, named after the wallet as the user sees it. */
+export async function addAccount(secrets: core.Secrets, index: number, password: string): Promise<core.Secrets> {
+  const name = core.accountName(secrets, index); // from the named list: the vault alone may still say "Wallet 1"
+  return saveSecrets((stored) => core.addAccount(stored, index, name), password);
+}
+
+/**
+ * Forget wallet `index`: its entry in the vault, and what Keshi kept for it on
+ * this device (cached balances, site connections, quantum-ready address). The
+ * caller must select another wallet afterwards, since indexes above `index`
+ * move down by one. The last wallet cannot be removed.
+ */
+export async function removeWallet(index: number, password: string): Promise<core.Secrets> {
+  const file = await local.get<core.VaultFile>("vault");
+  if (!file) throw new Error("No wallet on this device");
+  const stored = await withNames(await provePassword(file, password));
+  await local.remove("tries");
+  const gone = core.selectWallet(stored, index);
+  if (!core.walletsOf(stored)[index]) throw new Error("Unknown wallet");
+  const kept: core.Secrets = { ...core.removeWallet(stored, index), dataKey: stored.dataKey };
+  await local.set("vault", await core.lockVault(kept, password));
+  // Names are kept by index: write the list again in the new order.
+  const names: Record<string, string> = {};
+  core.walletsOf(kept).forEach((w, i) => (names[i] = w.name));
+  await local.set(NAMES, names);
+  await remember(kept);
+  // Clean up what was kept for that wallet, unless another entry still derives the same addresses.
+  const stillThere = core.walletsOf(kept).some((w) => w.key === gone.key && w.phrase === gone.phrase && core.accountNumber(w) === core.accountNumber(gone));
+  if (!stillThere) {
+    for (const net of [core.MAINNET, core.TESTNET]) {
+      try {
+        const snap = await loadCached(gone, net);
+        const mine = new Set([...(snap?.addresses.map((a) => a.address) ?? []), core.accountOf(gone, net).derive(false, 0).address]);
+        const sites = (await local.get<Record<string, Site>>("sites")) ?? {};
+        const left = Object.fromEntries(Object.entries(sites).filter(([, s]) => !mine.has(s.address)));
+        if (Object.keys(left).length !== Object.keys(sites).length) await local.set("sites", left);
+        await local.remove(snapKey(gone, net));
+        await local.remove(pqKey(gone, net));
+      } catch {
+        /* a wallet whose keys cannot be derived has nothing cached under them */
+      }
+    }
+  }
+  return kept;
 }
 
 /* ------------------------------------------------ Ethereum tokens and swaps */
@@ -810,11 +887,12 @@ export async function rememberEthToken(t: core.TokenMeta): Promise<void> {
   if (!list.some((x) => x.address.toLowerCase() === t.address.toLowerCase())) await local.set("ethTokens", [...list, t].slice(-30));
 }
 
-export async function ethTokenBalances(secrets: core.Secrets): Promise<{ meta: core.TokenMeta; balance: bigint }[]> {
+/** Balance of each token the user added. `balance` is null when it could not be read: unknown is not zero. */
+export async function ethTokenBalances(secrets: core.Secrets): Promise<{ meta: core.TokenMeta; balance: bigint | null }[]> {
   const { address } = core.ethAccountOf(secrets);
   const rpc = new core.EthRpc();
   const list = await ethTokens();
-  const balances = await Promise.all(list.map((t) => rpc.tokenBalance(t.address, address).catch(() => 0n)));
+  const balances = await Promise.all(list.map((t) => rpc.tokenBalance(t.address, address).catch(() => null)));
   return list.map((meta, i) => ({ meta, balance: balances[i]! }));
 }
 

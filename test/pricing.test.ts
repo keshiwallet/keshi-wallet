@@ -32,3 +32,20 @@ describe("shipped prices", () => {
     expect(c.serviceFor(c.MAINNET, "send", shipped)).toBeUndefined();
   });
 });
+
+import { walkBook } from "../src/core/exchange";
+describe("walking an order book for an amount (audit H-03)", () => {
+  const asks: [number, number][] = [[1.226, 812.4], [1.2284, 1540], [1.231, 920.11]];
+  it("averages over the levels the amount eats through", () => {
+    expect(walkBook(asks, 100)).toEqual({ avg: 1.226, filled: 100, enough: true });
+    const w = walkBook(asks, 1500);
+    expect(w.enough).toBe(true);
+    expect(w.filled).toBe(1500);
+    expect(w.avg).toBeCloseTo(1.2271, 4);
+  });
+  it("says how much a thin book can take, and skips odd levels", () => {
+    expect(walkBook([[1.22, 700]], 1500)).toEqual({ avg: 1.22, filled: 700, enough: false });
+    expect(walkBook([[0, 10], [1.22, 5]], 5)).toEqual({ avg: 1.22, filled: 5, enough: true });
+    expect(walkBook([], 5)).toEqual({ avg: 0, filled: 0, enough: false });
+  });
+});

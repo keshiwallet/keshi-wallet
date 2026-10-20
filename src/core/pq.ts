@@ -60,8 +60,8 @@ export function pqAddress(internalKey: Uint8Array, xmssPublicKey: Uint8Array, ne
 }
 
 /** Derive the post-quantum key and the address in one go. Takes a second or two. */
-export function derivePqAddress(phrase: string, internalKey: Uint8Array, net: Network, change: boolean, index: number, mode: Derivation = "pearl"): PqAddress {
-  const { privateSeed, publicSeed } = pqSeeds(phrase, net, change, index, 0, mode);
+export function derivePqAddress(phrase: string, internalKey: Uint8Array, net: Network, change: boolean, index: number, mode: Derivation = "pearl", account = 0): PqAddress {
+  const { privateSeed, publicSeed } = pqSeeds(phrase, net, change, index, account, mode);
   const { pk } = xmssKeygen(privateSeed, publicSeed);
   privateSeed.fill(0);
   return pqAddress(internalKey, pk, net);

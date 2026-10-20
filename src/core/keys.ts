@@ -93,6 +93,7 @@ export interface Account {
 export function accountFromPhrase(phrase: string, net: Network, account = 0, mode: Derivation = "pearl"): Account {
   const clean = cleanPhrase(phrase);
   if (!validateMnemonic(clean, wordlist)) throw new Error("Invalid recovery phrase");
+  if (!Number.isInteger(account) || account < 0 || account >= HARDENED) throw new Error("Invalid account number");
   const seed = mnemonicToSeedSync(clean, "");
   const acct = accountNode(seed, 86, net.coinType, account, mode);
   const node = (change: boolean, index: number) => acct.deriveChild(change ? 1 : 0).deriveChild(index);

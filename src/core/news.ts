@@ -61,12 +61,12 @@ const tag = (block: string, name: string): string => {
   return m ? m[1]! : "";
 };
 
-/** Only plain web links are ever opened. Bing's redirect links are unwrapped to the article itself. */
+/** Only https web links are ever opened. Bing's redirect links are unwrapped to the article itself. */
 export function articleUrl(raw: string): string | null {
   try {
     let u = new URL(decodeText(raw));
     if (/(^|\.)bing\.com$/i.test(u.hostname) && u.searchParams.get("url")) u = new URL(u.searchParams.get("url")!);
-    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    if (u.protocol !== "https:") return null; // every newsroom Keshi reads serves https; a plain-http link would be a feed problem, not a story
     u.hash = "";
     for (const k of [...u.searchParams.keys()]) if (/^utm_|^ref$|^fbclid$|^gclid$/i.test(k)) u.searchParams.delete(k);
     return u.toString();
