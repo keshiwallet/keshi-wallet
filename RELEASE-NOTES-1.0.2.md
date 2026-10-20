@@ -30,4 +30,4 @@ node verify.mjs
 `keshi-chrome-1.0.2.zip` (attached) is the package uploaded to the Chrome Web Store.
 SHA-256: `61d7b9502396fc48d823b34e6d8e9226ac62f32bc810d388734441f3cdb2c3d1`
 
-Keshi is independent (not made by Pearl Research Labs) and has not been audited by a firm yet: start with a small amount.
+
