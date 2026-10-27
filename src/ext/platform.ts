@@ -20,7 +20,7 @@ const dec = (s: string) =>
   JSON.parse(s, (_k, x) => (x && typeof x === "object" && "$b" in x ? BigInt(x.$b) : x && typeof x === "object" && "$u" in x ? Uint8Array.from(x.$u) : x));
 
 /** Local keys whose values are encrypted at rest. Settings and the vault itself are not in this list. */
-const SEALED = /^(snap:|contacts$|sites$|crossings$|watch$|ethTokens$|inscriptions:|pendingReveal:|pendingTransfer:|ethLastSend$|pin:|pq:|bridgeEth$|walletNames$|newsRead$|sent:)/;
+const SEALED = /^(snap:|contacts$|sites$|crossings$|watch$|watched$|lifi$|ethTokens$|inscriptions:|pendingReveal:|pendingTransfer:|ethLastSend$|pin:|pq:|bridgeEth$|walletNames$|newsRead$|sent:)/;
 let dataKey: Uint8Array | null = null;
 
 /** Give (or take away) the key that unlocks the encrypted local data. */
@@ -141,8 +141,10 @@ export interface Settings {
   wallet: number;
   /** Unit of the total on the home screen. */
   unit: "prl" | "usd";
-  /** Whether the home screen and Activity read the wallet's Ethereum address from public servers. Off for a wallet created here until the user first opens Swap, Bridge or Receive ETH. */
+  /** Whether the home screen and Activity read the wallet's Ethereum address from public servers. On by default since 1.0.3 (Settings > Privacy turns it off); Swap, Bridge, Buy with USDT and Receive ETH turn it back on when used. */
   ethereum: boolean;
+  /** The three-step explanation on Buy with USDT has been read and closed. */
+  usdtIntroSeen?: boolean;
 }
 export const DEFAULT_SETTINGS: Settings = { network: "mainnet", autoLockMinutes: 15, hideBalance: false, quote: "usdt", theme: "system", wallet: 0, unit: "prl", ethereum: true };
 

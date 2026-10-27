@@ -16,7 +16,8 @@ type Sheet =
   | { kind: "ethtx"; tx: core.EthActivity }
   | { kind: "tokens" }
   | { kind: "asset"; asset: "ETH" | "wPRL" }
-  | { kind: "ethsend"; asset: "ETH" | "wPRL" };
+  | { kind: "ethsend"; asset: "ETH" | "wPRL" }
+  | { kind: "prl" };
 
 const short = (a: string, n = 8) => (a.length > 2 * n + 3 ? `${a.slice(0, n + 4)}…${a.slice(-n)}` : a);
 const usd = (n: number) =>
@@ -37,12 +38,22 @@ const fmtEth = (wei: bigint): string => {
   return eight === "0.00000000" ? "under 0.00000001" : eight.replace(/0+$/, "");
 };
 
-function useCopy(): [string | null, (text: string, tag?: string) => void] {
+/**
+ * Clears the clipboard 30 s after a secret was copied. Keshi does not read the clipboard (that would
+ * need another permission), so it simply overwrites it while this screen is still open; once the
+ * popup is closed, the timer is gone with it.
+ */
+function wipeClipboardLater() {
+  setTimeout(() => navigator.clipboard?.writeText("").catch(() => {}), 30_000);
+}
+
+function useCopy(): [string | null, (text: string, tag?: string, secret?: boolean) => void] {
   const [copied, setCopied] = useState<string | null>(null);
   return [
     copied,
-    (text, tag = text) => {
+    (text, tag = text, secret = false) => {
       navigator.clipboard?.writeText(text).catch(() => {});
+      if (secret) wipeClipboardLater();
       setCopied(tag);
       setTimeout(() => setCopied(null), 1400);
     },
@@ -51,7 +62,7 @@ function useCopy(): [string | null, (text: string, tag?: string) => void] {
 
 declare const __KESHI_UNLOCK__: string | undefined;
 const UNLOCK_STYLE: "" | "nacre" | "dial" = typeof __KESHI_UNLOCK__ === "string" && (__KESHI_UNLOCK__ === "nacre" || __KESHI_UNLOCK__ === "dial") ? __KESHI_UNLOCK__ : "";
-const KESHI_VERSION = "1.0.2";
+const KESHI_VERSION = "1.0.3";
 const SUPPORT_EMAIL = "contact@keshiwallet.com";
 
 const ICONS: Record<string, string> = {
@@ -121,7 +132,7 @@ function QrImage({ svg, small }: { svg: string; small?: boolean }) {
 }
 
 /** The wallet's own Ethereum address, with a QR code, for topping up ETH or wPRL. */
-function EthAddressCard({ address, title = "Your Ethereum address in Keshi", children }: { address: string; title?: string; children?: ReactNode }) {
+function EthAddressCard({ address, title = "Your Ethereum address in Keshi", chain, children }: { address: string; title?: string; /** Named when the card is shown for another EVM chain (Arbitrum…): the note then says the address is the same everywhere. */ chain?: string; children?: ReactNode }) {
   const [svg, setSvg] = useState("");
   const [copied, copy] = useCopy();
   useEffect(() => {
@@ -133,10 +144,14 @@ function EthAddressCard({ address, title = "Your Ethereum address in Keshi", chi
       <QrImage svg={svg} small />
       <p className="addr-box"><Addr value={address} /></p>
       <button className="btn" onClick={() => copy(address)}>
-        {copied ? "Copied" : "Copy Ethereum address"}
+        {copied ? "Copied" : chain ? "Copy address" : "Copy Ethereum address"}
       </button>
       {children}
-      <p className="muted small">Ethereum network only: ETH, wPRL and other Ethereum tokens. Never send PRL to this address.</p>
+      <p className="muted small">
+        {chain
+          ? `Your EVM address: the same on ${chain}, Ethereum, Arbitrum, BNB Chain and Polygon. Send USDT to it on ${chain} only. Never send PRL to this address.`
+          : "Ethereum network only: ETH, wPRL and other Ethereum tokens. Never send PRL to this address."}
+      </p>
     </div>
   );
 }
@@ -255,9 +270,8 @@ export function App() {
       <Onboarding
         start={startOn}
         onDone={(s) => {
-          // No Ethereum lookups until the user goes there (Swap, Bridge or Receive ETH turn them on):
-          // a restored phrase may have an Ethereum address too, but nobody is told about it before the user asks.
-          void saveSettings({ ethereum: false });
+          // The Ethereum side (ETH, wPRL) shows from the start, like every multi-chain wallet: buying with USDT and
+          // the bridge both live there. Settings > Privacy > "Check Ethereum automatically" turns it off for those who prefer.
           setSecrets(s);
           setStage("ready");
         }}
@@ -818,6 +832,7 @@ function Main({ secrets, setSecrets, settings, saveSettings, onLock }: MainProps
   if (sheet?.kind === "tx") return <TxDetail {...ctx} tx={sheet.tx} flag={sheet.flag} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "ethtx") return <EthTxDetail {...ctx} tx={sheet.tx} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "asset") return <EthAsset {...ctx} asset={sheet.asset} open={setSheet} onClose={() => setSheet(null)} />;
+  if (sheet?.kind === "prl") return <PrlAsset {...ctx} open={setSheet} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "ethsend") return <EthSend {...ctx} asset={sheet.asset} onClose={() => setSheet({ kind: "asset", asset: sheet.asset })} />;
   if (sheet?.kind === "tokens")
     return (
@@ -917,7 +932,7 @@ function Home({ snap, secrets, net, price, loading, error, open, settings, reloa
   }, [secrets, net.id, snap?.updated, settings.ethereum]);
 
   const rows: Holding[] = [];
-  if (snap) rows.push({ key: "prl", name: "PRL", where: "Pearl", amount: formatPrl(snap.balance, 4), prl: prlToNumber(snap.balance) });
+  if (snap) rows.push({ key: "prl", name: "PRL", where: "Pearl", amount: formatPrl(snap.balance, 4), prl: prlToNumber(snap.balance), onClick: () => open({ kind: "prl" }) });
   for (const t of tokens) {
     const have = mine[t.ticker] ?? 0n;
     if (have > 0n) rows.push({ key: "t:" + t.ticker, name: t.name, where: "PRL-20 token", amount: bigCompact(have), prl: t.floorGrains ? (t.floorGrains / 1e8) * Number(have) : undefined, onClick: () => open({ kind: "tokens" }) });
@@ -1345,7 +1360,7 @@ function TxDetail({ tx, flag, net, price, secrets, snap, reload, onClose }: Ctx 
       const size = core.estimateVsize(raw.vin.length, raw.vout.length);
       const oldRate = Number(BigInt(raw.fees ?? "0") / BigInt(size));
       // At least the fast rate, and clearly above what was paid.
-      const plan = core.speedUpPlan(raw, snap, Math.max(rate, Math.ceil(oldRate * 1.5) + 1));
+      const plan = core.speedUpPlan(raw, snap, Math.max(rate, Math.ceil(oldRate * 1.5) + 1), sent.inputs && sent.change !== undefined && sent.changeAddress ? { inputs: sent.inputs, change: sent.change, changeAddress: sent.changeAddress } : undefined);
       // The faster payment must pay exactly whom the user paid, exactly as much: a server cannot slip in another recipient.
       if (plan.to !== sent.to || plan.amount.toString() !== sent.amount || (plan.serviceAddress ?? "") !== (sent.serviceAddress ?? "") || plan.serviceFee.toString() !== sent.serviceFee)
         throw new Error("The network's copy of this payment does not match what you sent. Nothing was changed.");
@@ -1428,6 +1443,14 @@ function TxDetail({ tx, flag, net, price, secrets, snap, reload, onClose }: Ctx 
   );
 }
 
+/** "Before → after" for a balance, so the user sees what the screen is about to change. */
+const After = ({ from, to, about = false }: { from: string; to: string; about?: boolean }) => (
+  <span className="after">
+    <s>{from}</s>
+    <i aria-hidden="true">→</i>
+    <b>{about ? "about " : ""}{to}</b>
+  </span>
+);
 const Row = ({ k, v }: { k: string; v: ReactNode }) => (
   <div>
     <dt>{k}</dt>
@@ -1658,6 +1681,12 @@ function Send({ snap, secrets, net, price, reload, preset, onClose, settings }: 
           {review.serviceFee > 0n && <Row k={`Keshi fee (${review.serviceLabel})`} v={`${formatPrl(review.serviceFee)} PRL`} />}
           <Row k="Total leaving your wallet" v={`${formatPrl(review.amount + review.fee + review.serviceFee)} PRL`} />
           {price && <Row k="Value" v={usd(prlToNumber(review.amount) * price)} />}
+          {snap && (() => {
+            // Coins combined come straight back: only the fees leave.
+            const out = preset.combine ? review.fee + review.serviceFee : review.amount + review.fee + review.serviceFee;
+            const after = snap.balance - out;
+            return <Row k="Your PRL after" v={<After from={`${formatPrl(snap.balance, 4)} PRL`} to={`${formatPrl(after < 0n ? 0n : after)} PRL`} />} />;
+          })()}
         </dl>
         {preset.bridgeTo && (
           <p className="hint">
@@ -2168,6 +2197,16 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
               <Row k="You receive about" v={`${core.formatUnits(received, get.decimals)} ${get.symbol}`} />
               <Row k="You give" v={`${core.formatUnits(route.amountIn, give!.decimals)} ${give!.symbol}`} />
               <Row k="Ethereum fee" v={costUsd ? `about ${usd(costUsd)}, paid in ETH` : "Paid in ETH"} />
+              {hold && (() => {
+                const wprlAfter = dir === "buy" ? hold.wprl - route.amountIn : hold.wprl + received;
+                const ethAfter = dir === "buy" ? hold.eth + received : hold.eth - route.amountIn;
+                return (
+                  <>
+                    <Row k="Your wPRL after" v={<After from={`${formatPrl(hold.wprl, 4)} wPRL`} to={`${formatPrl(wprlAfter < 0n ? 0n : wprlAfter, 4)} wPRL`} about={dir === "sell"} />} />
+                    <Row k="Your ETH after" v={<After from={`${fmtEth(hold.eth)} ETH`} to={`${fmtEth(ethAfter < 0n ? 0n : ethAfter)} ETH, minus the fee`} about />} />
+                  </>
+                );
+              })()}
             </dl>
           )}
           {route && get && fee && <p className="muted small">Quote includes a {fee.label} Keshi fee.</p>}
@@ -2392,8 +2431,10 @@ const VENUE: Record<Venue, { name: string; how: string; site?: string }> = {
   uniswap: { name: "Uniswap", how: "No account needed. Pays in ETH on Ethereum." },
 };
 
-function TradeSheet({ side, secrets, setSecrets, net, snap, open, onClose, settings, saveSettings }: Ctx & { side: "buy" | "sell"; setSecrets: (s: core.Secrets) => void; open: (s: Sheet) => void; onClose: () => void }) {
+function TradeSheet({ side, secrets, setSecrets, net, snap, price, reload, open, onClose, settings, saveSettings }: Ctx & { side: "buy" | "sell"; setSecrets: (s: core.Secrets) => void; open: (s: Sheet) => void; onClose: () => void }) {
   const [amount, setAmount] = useState("");
+  // Buying has two ways in: USDT already held on another chain, or an exchange.
+  const [pay, setPay] = useState<"usdt" | "exchange">("exchange");
   const [venue, setVenue] = useState<Venue | null>(null);
   const [prices, setPrices] = useState<Partial<Record<Venue, number>>>({});
   /** Venues whose order book cannot fill the amount: how much they can take. */
@@ -2538,6 +2579,20 @@ function TradeSheet({ side, secrets, setSecrets, net, snap, open, onClose, setti
   return (
     <div className="screen">
       <Header title={`${verb} PRL`} onBack={onClose} />
+      {side === "buy" && (
+        <div className="seg paytabs" role="tablist">
+          <button role="tab" aria-selected={pay === "usdt"} className={pay === "usdt" ? "on" : ""} onClick={() => setPay("usdt")}>
+            Buy with USDT
+            <small>Arbitrum · BNB Chain · Polygon</small>
+          </button>
+          <button role="tab" aria-selected={pay === "exchange"} className={pay === "exchange" ? "on" : ""} onClick={() => setPay("exchange")}>
+            Exchange
+            <small>SafeTrade · BigONE · Uniswap</small>
+          </button>
+        </div>
+      )}
+      {side === "buy" && pay === "usdt" && <UsdtBuy secrets={secrets} net={net} snap={snap} price={price} reload={reload} settings={settings} saveSettings={saveSettings} open={open} embedded />}
+      {!(side === "buy" && pay === "usdt") && (<>
       <label className="field">
         <span>
           How much PRL <em>{side === "sell" && snap ? `${formatPrl(core.spendableTotal(snap))} in wallet` : ""}</em>
@@ -2684,6 +2739,7 @@ function TradeSheet({ side, secrets, setSecrets, net, snap, open, onClose, setti
           Bridge wPRL to PRL
         </button>
       )}
+      </>)}
     </div>
   );
 }
@@ -3157,12 +3213,12 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
   const [copied, copy] = useCopy();
 
   const loadList = useCallback(() => {
-    store.crossings().then((l) => {
+    store.crossings(own).then((l) => {
       setList(l);
       const b = new core.Bridge();
       l.slice(0, 8).forEach((c) => (c.back ? b.backStatus(c.txid) : b.status(c.txid)).then((s) => setStatus((m) => ({ ...m, [c.txid]: s }))).catch(() => {}));
     });
-  }, []);
+  }, [own]);
   const loadHold = useCallback(() => {
     store.ethHoldings(secrets).then(setHold).catch(() => {});
   }, [secrets]);
@@ -3361,6 +3417,8 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
         <dl className="rows">
           <Row k="You receive on Pearl" v={`${formatPrl(backQuote.net)} PRL`} />
           <Row k="Fees" v={backQuote.fee > 0n ? `${formatPrl(backQuote.fee)} wPRL, plus up to about ${ethText} in Ethereum fees` : `up to about ${ethText}, paid in ETH`} />
+          {hold && <Row k="Your wPRL after" v={<After from={`${formatPrl(hold.wprl, 4)} wPRL`} to={`${formatPrl(hold.wprl - backQuote.amount < 0n ? 0n : hold.wprl - backQuote.amount, 4)} wPRL`} />} />}
+          {snap && <Row k="Your PRL after" v={<After from={`${formatPrl(snap.balance, 4)} PRL`} to={`${formatPrl(snap.balance + backQuote.net, 4)} PRL`} about />} />}
         </dl>
       )}
       {dir === "back" && shortOfEth && (
@@ -3709,7 +3767,7 @@ function SettingsTab({ secrets, setSecrets, settings, saveSettings, onLock }: Ct
             Check Ethereum automatically
             <input type="checkbox" checked={settings.ethereum} onChange={(e) => saveSettings({ ethereum: e.target.checked })} />
           </label>
-          <p className="small muted">When on, the home screen and Activity read your Ethereum address through public servers. Opening Swap, Bridge or Receive ETH turns it on.</p>
+          <p className="small muted">On by default, so ETH and wPRL show on the home screen. When on, the home screen and Activity read your Ethereum address through public servers (Ethereum nodes and Blockscout), which see your IP address. Turn it off to read Ethereum only when you open Swap, Bridge, Buy with USDT or Receive ETH.</p>
         </li>
       </ul>
       <h4 className="group">Advanced</h4>
@@ -4223,8 +4281,8 @@ function TwoStep({ secrets, setSecrets, onClose }: { secrets: core.Secrets; setS
           <QrImage svg={svg} />
           <p className="muted small">Cannot scan? Type this setup key into the app:</p>
           <p className="addr setup-key">{secret.replace(/(.{4})/g, "$1 ").trim()}</p>
-          <button className="link" onClick={() => copy(secret)}>
-            {copied ? "Copied" : "Copy the setup key"}
+          <button className="link" onClick={() => copy(secret, secret, true)}>
+            {copied ? "Copied (cleared from the clipboard after 30 s)" : "Copy the setup key"}
           </button>
           <p className="muted small">
             If you lose the authenticator, restore the wallet with your recovery phrase. This is an extra check at the door, not a second key: it stops someone who knows your password from opening Keshi on this device through its screens. It does not protect a copy of your browser files whose password is known, nor against malware, and your recovery phrase remains the master key.
@@ -4563,6 +4621,567 @@ function EthAsset({ asset, secrets, price, open, onClose }: Ctx & { asset: EthAs
   );
 }
 
+/* ------------------------------------------------- Buy with USDT elsewhere */
+
+/**
+ * USDT held on Arbitrum, BNB Chain or Polygon becomes wPRL on the wallet's
+ * Ethereum address through LI.FI, in one signed transaction on the source
+ * chain (two when a permission is needed). A second, smaller purchase can bring
+ * a little ETH at the same time, so the return to PRL through the bridge can
+ * be paid. Keshi never holds the money.
+ */
+/** How a USDT purchase ended, as remembered once LI.FI said so. */
+const OUTCOME: Record<NonNullable<store.UsdtPurchase["outcome"]>, string> = {
+  arrived: "Arrived on your Ethereum address.",
+  partial: "Arrived only in part: less than quoted was delivered. Check Details.",
+  refunded: "Refunded on the source chain. Check Details for the amount returned.",
+  failed: "Failed. Check Details: a refund is not automatic in every case.",
+};
+
+function UsdtBuy({ secrets, net, snap, price, open, onClose, settings, saveSettings, embedded = false }: Ctx & { open: (s: Sheet) => void; onClose?: () => void; embedded?: boolean }) {
+  const [chainId, setChainId] = useState<core.SourceChain["id"]>("arbitrum");
+  const chain = core.sourceChain(chainId);
+  const [src, setSrc] = useState<{ address: string; usdt: bigint; gas: bigint } | null>(null);
+  const [srcError, setSrcError] = useState("");
+  const [hold, setHold] = useState<store.EthHoldings | null>(null);
+  const [ethUsd, setEthUsd] = useState<number | null>(null);
+  const [ethNeed, setEthNeed] = useState<bigint | null>(null);
+  const [amount, setAmount] = useState("");
+  const [withEth, setWithEth] = useState(true);
+  const [quotes, setQuotes] = useState<{ wprl: core.LifiQuote; eth: core.LifiQuote | null } | null>(null);
+  const [quoting, setQuoting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [step, setStep] = useState("");
+  const [error, setError] = useState("");
+  const [sent, setSent] = useState<{ wprl: string; eth?: string } | null>(null);
+  const [purchases, setPurchases] = useState<store.UsdtPurchase[]>([]);
+  const [status, setStatus] = useState<Record<string, core.LifiStatus>>({});
+  const [showAddr, setShowAddr] = useState(false);
+  const dec = chain.usdt.decimals;
+  const fmtUsdt = (v: bigint) => core.formatUnits(v, dec, 2);
+  const typed = core.parseUnits(amount.replace(",", "."), dec);
+
+  useEffect(() => {
+    store.ethHoldings(secrets).then(setHold).catch(() => {});
+    ethUsdNow().then(setEthUsd);
+    core.bridgeBackEthNeeded(new core.EthRpc()).then(setEthNeed).catch(() => {});
+    store.usdtPurchases(core.ethAccountOf(secrets).address).then(setPurchases);
+  }, [secrets]);
+  useEffect(() => {
+    setSrc(null);
+    setSrcError("");
+    setQuotes(null);
+    store.usdtSource(secrets, chain).then(setSrc).catch(() => setSrcError(`Could not reach ${chain.name} just now.`));
+  }, [secrets, chainId, sent]);
+
+  // How much ETH the return to PRL will need, beyond what the address already holds, bought with a few USDT.
+  const ethShort = hold && ethNeed !== null ? (hold.eth < ethNeed ? ethNeed - hold.eth : 0n) : null;
+  const ethUsdtNeeded: bigint | null = ethShort === null || !ethUsd ? null : ethShort === 0n ? 0n : BigInt(Math.ceil(Math.min(30, Math.max(2, (Number(ethShort) / 1e18) * ethUsd * 1.5)))) * 10n ** BigInt(dec);
+  const ethLegLarge = !!typed && !!ethUsdtNeeded && ethUsdtNeeded * 5n > typed;
+  const ethLeg = withEth && !!ethUsdtNeeded && ethUsdtNeeded > 0n;
+  const wprlPart = typed && ethLeg ? typed - ethUsdtNeeded! : typed;
+  // A rough figure before any quote, from today's PRL price and Keshi's fee only (LI.FI's own
+  // fees and the price move are not in it): what to expect, never what is promised.
+  const buyFee = core.usdtBuyFee();
+  const roughPrl = wprlPart && wprlPart > 0n && price ? ((Number(wprlPart) / 10 ** dec) * (1 - Number(buyFee?.bips ?? 0n) / 10_000)) / price : null;
+  // What a small purchase pays whatever its size, in dollars: the ETH bought for the bridge fee (or, when the
+  // address already holds ETH, the ETH the bridge will burn), LI.FI's route costs (about a dollar on these
+  // chains), and PearlBridge's minimum of 4 PRL on the way back. The percentage fees (Keshi 0.5% here, 0.1%
+  // on the bridge, PearlBridge 0.5%) come on top. Figures are estimates for guidance, not a quote.
+  const LIFI_FIXED_USD = 1;
+  const BRIDGE_MIN_PRL = 4;
+  const PERCENT_FEES = Number(buyFee?.bips ?? 0n) / 10_000 + 0.006;
+  const fixedUsd =
+    ethUsdtNeeded === null || !price
+      ? null
+      : (ethUsdtNeeded > 0n ? Number(ethUsdtNeeded) / 10 ** dec : ethNeed && ethUsd ? (Number(ethNeed) / 1e18) * ethUsd : 0) + LIFI_FIXED_USD + BRIDGE_MIN_PRL * price;
+  // From this amount, fixed costs stay under 5% of the purchase (rounded up to 10 USDT).
+  const suggestedMin = fixedUsd !== null && Number.isFinite(fixedUsd) ? Math.ceil(fixedUsd / (0.05 - PERCENT_FEES) / 10) * 10 : null;
+  const typedUsd = typed ? Number(typed) / 10 ** dec : null;
+  const fixedShare = fixedUsd !== null && typedUsd ? Math.round((fixedUsd / typedUsd) * 100) : null;
+
+  // Watch each purchase until LI.FI says it arrived: every 8 s for the first
+  // minutes, then once a minute, and no longer than two hours, so a stuck one
+  // cannot keep asking LI.FI forever (the shared key has a request allowance).
+  useEffect(() => {
+    const open_ = purchases.filter((p) => !p.done && Date.now() - p.at < 2 * 3600_000);
+    if (!open_.length) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const lifi = new core.LiFi();
+    const tick = async () => {
+      for (const p of open_) {
+        const s = await lifi.status(p.txHash, core.sourceChain(p.chain)).catch(() => null);
+        if (!alive || !s) continue;
+        setStatus((m) => ({ ...m, [p.txHash]: s }));
+        const outcome = store.purchaseOutcome(s);
+        if (outcome) {
+          await store.recordPurchase({ ...p, done: true, outcome });
+          if (alive) setPurchases(await store.usdtPurchases(p.from));
+        }
+      }
+      if (!alive) return;
+      const youngest = Math.min(...open_.map((p) => Date.now() - p.at));
+      timer = setTimeout(tick, youngest < 3 * 60_000 ? 8000 : 60_000);
+    };
+    void tick();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [purchases.map((p) => p.txHash + (p.done ? "d" : "")).join(",")]);
+
+  const getQuote = async () => {
+    setError("");
+    setQuotes(null);
+    if (!src) return setError(`Still reading your balance on ${chain.name}.`);
+    if (!typed || typed <= 0n) return setError("Enter an amount in USDT, for example 50");
+    if (typed > src.usdt) return setError(`You have ${fmtUsdt(src.usdt)} USDT on ${chain.name}.`);
+    if (ethLeg && wprlPart! <= 10n ** BigInt(dec)) return setError(`Too small: ${fmtUsdt(ethUsdtNeeded!)} USDT of this would go to ETH for fees. Send more, or untick the ETH option.`);
+    if (src.gas === 0n) return setError(`Your address on ${chain.name} has no ${chain.gas} to pay that chain's fee. Send a little ${chain.gas} there first (a few cents' worth).`);
+    setQuoting(true);
+    try {
+      if (!settings.ethereum) void saveSettings({ ethereum: true });
+      const lifi = new core.LiFi();
+      const wprl = await lifi.quote(chain, src.address, wprlPart!, "wprl");
+      const eth = ethLeg ? await lifi.quote(chain, src.address, ethUsdtNeeded!, "eth") : null;
+      // Second opinion on the price, from the wallet's own feeds against the USDT typed here (one USDT is a dollar):
+      // a quote that disagrees by more than 20% is not signed, and without a price of our own nothing is signed at all.
+      if (!price) throw new Error("Keshi could not read today's PRL price to check this quote. Nothing was sent; try again in a moment.");
+      {
+        const paidUsd = Number(wprlPart!) / 10 ** chain.usdt.decimals;
+        const implied = prlToNumber(wprl.toAmount) * price;
+        if (implied < paidUsd * 0.8) throw new Error(`LI.FI's quote is worth about ${usd(implied)} at today's PRL price, far below the ${usd(paidUsd)} paid. Nothing was sent; try again later.`);
+      }
+      if (eth) {
+        if (!ethUsd) throw new Error("Keshi could not read today's ETH price to check this quote. Nothing was sent; try again in a moment.");
+        const paidUsd = Number(ethUsdtNeeded!) / 10 ** chain.usdt.decimals;
+        const implied = (Number(eth.toAmount) / 1e18) * ethUsd;
+        if (implied < paidUsd * 0.8) throw new Error("LI.FI's ETH quote is far below today's ETH price. Nothing was sent; try again later.");
+      }
+      setQuotes({ wprl, eth });
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setQuoting(false);
+    }
+  };
+
+  const buy = async () => {
+    if (!quotes) return;
+    if (Date.now() - quotes.wprl.at > core.QUOTE_LIFETIME_MS) {
+      setQuotes(null);
+      return setError("That quote is more than a minute old. Ask for a fresh one.");
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const wprlHash = await store.buyWithUsdt(secrets, chain, quotes.wprl, quotes.wprl.fromAmount, setStep);
+      let ethHash: string | undefined;
+      if (quotes.eth) {
+        try {
+          // The first purchase must be in a block before the second is prepared: its nonce and the USDT permission depend on it.
+          setStep("Waiting for the wPRL purchase to confirm before buying the ETH…");
+          const ok = await new core.EthRpc(undefined, chain.rpcs).wait(wprlHash, 180_000, 3000);
+          if (!ok) throw new Error("the wPRL purchase was rejected by the network, so the ETH purchase was not attempted");
+          if (Date.now() - quotes.eth.at > 5 * core.QUOTE_LIFETIME_MS) throw new Error("its quote expired while the first purchase confirmed");
+          ethHash = await store.buyWithUsdt(secrets, chain, quotes.eth, quotes.eth.fromAmount, (t) => setStep(`ETH for fees: ${t}`));
+        } catch (e) {
+          setError(`Your wPRL purchase went through, but the small ETH purchase did not: ${errText(e)}. You can get ETH another way before bridging back.`);
+        }
+      }
+      setSent({ wprl: wprlHash, eth: ethHash });
+      setQuotes(null);
+      setAmount("");
+      setPurchases(await store.usdtPurchases(core.ethAccountOf(secrets).address));
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setBusy(false);
+      setStep("");
+    }
+  };
+
+  const seconds = (n: number) => (n < 90 ? `about ${Math.max(3, Math.round(n))} s` : `about ${Math.round(n / 60)} min`);
+  const wprlOut = quotes ? quotes.wprl.toAmount : 0n;
+  const wprlMin = quotes ? quotes.wprl.toAmountMin : 0n;
+
+  const body = (
+    <>
+      {!embedded && <p className="muted small">Your USDT on {chain.name} becomes wPRL on your Ethereum address in Keshi, through LI.FI. You sign on {chain.name}; the money never passes through Keshi or an exchange account.</p>}
+      <div className="seg">
+        {core.SOURCE_CHAINS.map((c) => (
+          <button key={c.id} className={chainId === c.id ? "on" : ""} disabled={busy} onClick={() => setChainId(c.id)}>
+            {c.name}
+          </button>
+        ))}
+      </div>
+      {!settings.usdtIntroSeen && (
+        <div className="card intro">
+          <strong>How it works</strong>
+          <ol className="steps3">
+            <li>Send USDT from your exchange to your address on {chain.name} (shown below), with a few cents of {chain.gas} for the fee.</li>
+            <li>Buy here: your USDT becomes wPRL on your Ethereum address in Keshi, in a few seconds.</li>
+            <li>Then Bridge brings the wPRL home as PRL.</li>
+          </ol>
+          <button className="btn small" onClick={() => saveSettings({ usdtIntroSeen: true })}>
+            Got it
+          </button>
+        </div>
+      )}
+      <dl className="rows">
+        <Row k={`Your USDT on ${chain.name}`} v={src ? `${fmtUsdt(src.usdt)} USDT` : srcError ? "?" : "···"} />
+        <Row k={`${chain.gas} for ${chain.name}'s fee`} v={src ? (src.gas === 0n ? "none" : `${core.formatUnits(src.gas, 18, 5)} ${chain.gas}`) : "···"} />
+      </dl>
+      {srcError && <p className="hint">{srcError}</p>}
+      <p className="muted small">
+        Send USDT to this address on {chain.name} from any exchange (plus a few cents of {chain.gas} for its fee), then buy.{" "}
+        <button className="link inline" onClick={() => setShowAddr(!showAddr)}>
+          {showAddr ? "Hide the address" : "Show the address"}
+        </button>
+      </p>
+      {showAddr && src && <EthAddressCard address={src.address} title={`Your address on ${chain.name}`} chain={chain.name} />}
+      <label className="field">
+        <span>
+          Amount of USDT to spend <em>{src ? `${fmtUsdt(src.usdt)} available` : ""}</em>
+        </span>
+        <div className="with-btn">
+          <input inputMode="decimal" placeholder="0.00" value={amount} disabled={busy} onChange={(e) => { setAmount(e.target.value); setQuotes(null); }} />
+          {src && src.usdt > 0n && (
+            <button type="button" disabled={busy} onClick={() => { setAmount(core.formatUnits(src.usdt, dec, dec).replace(/,/g, "")); setQuotes(null); }}>
+              Spend all
+            </button>
+          )}
+        </div>
+        {!quotes && roughPrl !== null && Number.isFinite(roughPrl) && roughPrl > 0 && (
+          <small className="muted">
+            About {roughPrl.toLocaleString("en-US", { maximumFractionDigits: roughPrl < 10 ? 2 : 0 })} PRL at today's price{ethLeg ? ", after the ETH part" : ""}. The quote gives the exact figure.
+          </small>
+        )}
+      </label>
+      {!quotes && suggestedMin !== null && typedUsd !== null && typedUsd > 0 && typedUsd < suggestedMin && (
+        <p className="hint">
+          Small amounts cost more: about {usd(fixedUsd!)} of fixed fees (paid to LI.FI, the bridges and the network, not to Keshi) on the way to PRL, around {fixedShare}% of this purchase. From about {suggestedMin} USDT they fall under 5%.
+        </p>
+      )}
+      {ethUsdtNeeded !== null && ethUsdtNeeded > 0n && (
+        <label className="check">
+          <input type="checkbox" checked={withEth} disabled={busy} onChange={(e) => { setWithEth(e.target.checked); setQuotes(null); }} />
+          {ethLegLarge && withEth && <span className="hint warn">That is more than a fifth of this purchase; untick it if you would rather get ETH another way.</span>}
+          <span>
+            Also buy about {fmtUsdt(ethUsdtNeeded)} USDT of ETH, to pay the bridge fee when you bring the wPRL back as PRL. This is a second, separate purchase: its own permission and transaction on {chain.name}, with its own network fee, sent only once the wPRL purchase is confirmed. If it fails, the wPRL purchase stays done.{" "}
+            <em className="muted">Your Ethereum address has {hold ? fmtEth(hold.eth) : "···"} ETH; the bridge needs about {ethNeed ? core.formatEth(ethNeed, 4) : "···"}.</em>
+          </span>
+        </label>
+      )}
+      {ethUsdtNeeded === 0n && <p className="muted small">Your Ethereum address already holds enough ETH for the return to PRL.</p>}
+      {!quotes && (
+        <button className="btn primary" disabled={quoting || busy || !typed} onClick={getQuote}>
+          {quoting ? "Asking LI.FI…" : "Get a quote"}
+        </button>
+      )}
+      {quotes && (
+        <>
+          <dl className="rows">
+            <Row k="You pay" v={`${fmtUsdt(quotes.wprl.fromAmount + (quotes.eth?.fromAmount ?? 0n))} USDT on ${chain.name}`} />
+            <Row k="You receive about" v={`${formatPrl(wprlOut, 4)} wPRL (${usd(quotes.wprl.toAmountUsd)})`} />
+            <Row k="At least" v={`${formatPrl(wprlMin, 4)} wPRL`} />
+            {quotes.eth && <Row k="Plus ETH for fees" v={`${fmtEth(quotes.eth.toAmount)} ETH (${usd(quotes.eth.toAmountUsd)})`} />}
+            <Row k="Route" v={`${quotes.wprl.toolName} via LI.FI, ${seconds(quotes.wprl.duration)}`} />
+            {(() => {
+              // Two separate lines: what Keshi keeps, and what the route (LI.FI and the bridges) keeps.
+              const keshiUsd = quotes.wprl.keshiFeeUsd + (quotes.eth?.keshiFeeUsd ?? 0);
+              const routeUsd = Math.max(0, quotes.wprl.includedFeesUsd + (quotes.eth?.includedFeesUsd ?? 0) - keshiUsd);
+              return (
+                <>
+                  {keshiUsd > 0 && <Row k={`Keshi fee (${core.usdtBuyFee()?.label ?? "0.5%"})`} v={usd(keshiUsd)} />}
+                  <Row k="Route fees, not Keshi" v={usd(routeUsd)} />
+                </>
+              );
+            })()}
+            {quotes.wprl.extraFeesUsd + (quotes.eth?.extraFeesUsd ?? 0) > 0 && <Row k="Other fees on top, not Keshi" v={usd(quotes.wprl.extraFeesUsd + (quotes.eth?.extraFeesUsd ?? 0))} />}
+            <Row k={`${chain.name} fee`} v={`about ${usd(quotes.wprl.gasUsd + (quotes.eth?.gasUsd ?? 0))}, paid in ${chain.gas}`} />
+            {hold && <Row k="Your wPRL after" v={<After from={`${formatPrl(hold.wprl, 4)} wPRL`} to={`${formatPrl(hold.wprl + wprlOut, 4)} wPRL`} about />} />}
+            {hold && quotes.eth && <Row k="Your ETH after" v={<After from={`${fmtEth(hold.eth)} ETH`} to={`${fmtEth(hold.eth + quotes.eth.toAmount)} ETH`} about />} />}
+            {src && <Row k={`Your USDT on ${chain.name} after`} v={<After from={`${fmtUsdt(src.usdt)} USDT`} to={`${fmtUsdt(src.usdt - typed!)} USDT`} />} />}
+          </dl>
+          {price && quotes.wprl.toAmountUsd > 0 && (
+            <p className="muted small">
+              That is {usd(quotes.wprl.toAmountUsd / prlToNumber(wprlOut))} per PRL. Exchanges are around {usd(price)} right now.
+            </p>
+          )}
+          <p className="muted small">
+            Keshi's {core.usdtBuyFee()?.label ?? "0.5%"} fee is inside the quote.{" "}
+            {quotes.eth
+              ? `Two purchases follow, one after the other: the wPRL, then the ETH once the first is confirmed. Each takes one transaction on ${chain.name}, two if LI.FI first needs permission for its exact amount, and each pays its own network fee. Keep Keshi open until both are sent.`
+              : `The USDT leaves ${chain.name} in one transaction (two if LI.FI first needs permission for this exact amount); wPRL arrives on Ethereum on its own, and you can close Keshi meanwhile.`}
+          </p>
+          {step && <p className="muted small">{step}</p>}
+          <div className="actions">
+            <button className="btn primary" disabled={busy} onClick={buy}>
+              {busy ? "Working…" : "Buy"}
+            </button>
+            <button className="btn" disabled={busy} onClick={() => setQuotes(null)}>
+              Change
+            </button>
+          </div>
+        </>
+      )}
+      {error && <p className="error">{error}</p>}
+      {sent && (
+        <div className="card start">
+          <strong>Sent</strong>
+          <p className="muted">Your USDT is on its way. The list below follows it until the wPRL lands on your Ethereum address; then bring it home as PRL with the bridge.</p>
+          <button className="btn primary" onClick={() => open({ kind: "bridge" })}>
+            Bridge wPRL to PRL
+          </button>
+        </div>
+      )}
+      {purchases.length > 0 && (
+        <>
+          <h3>Your USDT purchases</h3>
+          <ul className="list plain">
+            {purchases.map((p) => {
+              const c = core.sourceChain(p.chain);
+              const s = status[p.txHash];
+              return (
+                <li key={p.txHash}>
+                  <span className="main">
+                    <span>
+                      {core.formatUnits(p.amount, c.usdt.decimals, 2)} USDT on {c.name} → {p.to === "wprl" ? `${formatPrl(p.expected, 4)} wPRL` : `${fmtEth(p.expected)} ETH`}
+                    </span>
+                    <small className={p.outcome === "failed" || p.outcome === "partial" ? "down" : ""}>{s ? core.describeStatus(s) : p.outcome ? OUTCOME[p.outcome] : p.done ? "Ended: check Details for the outcome." : Date.now() - p.at > 2 * 3600_000 ? "No longer followed here: check Details." : "Checking…"}</small>
+                  </span>
+                  <a className="link" href={(s?.explorer ?? c.explorerTx.replace("{hash}", p.txHash))} target="_blank" rel="noreferrer">
+                    Details
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
+      <details className="explain">
+        <summary>How this works</summary>
+        <p>No exchange account, and Keshi never holds the money. LI.FI is a service that finds the cheapest path between chains. Keshi asks it for a quote and shows it to you; if you accept, your wallet signs one transaction on {chain.name} that hands the USDT to LI.FI's contract. LI.FI's partners carry the value to Ethereum and swap it for wPRL on Uniswap, delivered to the very same address, which is yours on every Ethereum-compatible chain.</p>
+        <p>What can go wrong: if a route fails mid-way, LI.FI usually refunds the USDT on {chain.name}, sometimes partly, sometimes only after a while; in rare cases it has to be claimed on LI.FI's site. Each purchase in the list keeps its outcome, and Details opens LI.FI's own page. Quotes move with the market; the "at least" figure is the floor you accept. Keshi's fee is taken inside the quote by LI.FI's contract and paid to Keshi; the rest goes to the bridges and to {chain.name}'s network.</p>
+      </details>
+    </>
+  );
+  if (embedded) return body;
+  return (
+    <div className="screen">
+      <Header title="Buy with USDT" onBack={onClose} />
+      {body}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ PRL */
+
+const VALUE_PERIODS = HOME_PERIODS.filter((p) => p.id !== "24H");
+
+/** The PRL screen: balance, its value over time, and addresses watched without their keys. */
+function PrlAsset({ snap, secrets, net, price, open, onClose, settings, reload }: Ctx & { open: (s: Sheet) => void; onClose: () => void }) {
+  const hidden = settings.hideBalance;
+  const held = snap ? snap.balance + snap.immature : null;
+  const [period, setPeriod] = useState<(typeof VALUE_PERIODS)[number]["id"]>("30D");
+  const [points, setPoints] = useState<core.Point[] | null>(null);
+  const [inUsd, setInUsd] = useState(true);
+  useEffect(() => {
+    if (!snap) return;
+    let alive = true;
+    setPoints(null);
+    const p = VALUE_PERIODS.find((x) => x.id === period)!;
+    const build = (prices: core.Point[] | null) => alive && setPoints(core.valueSeries(held!, snap.activity, prices, undefined, p.days));
+    if (net.id !== "mainnet") {
+      setInUsd(false);
+      build(null);
+      return;
+    }
+    priceSeries(p)
+      .then((r) => { setInUsd(true); build(r.pts); })
+      .catch(() => { setInUsd(false); build(null); });
+    return () => {
+      alive = false;
+    };
+  }, [period, snap?.updated, net.id]);
+  const first = points?.[0]?.value, last = points?.[points.length - 1]?.value;
+  const move = first !== undefined && last !== undefined ? last - first : null;
+  const fmt = (v: number) => (inUsd ? usd(v) : `${v.toLocaleString("en-US", { maximumFractionDigits: 2 })} PRL`);
+  return (
+    <div className="screen">
+      <Header title="PRL" onBack={onClose} />
+      <div className="asset-hero">
+        <Coin name="PRL" native />
+        <p className="hero-amt">
+          {held === null ? "···" : hidden ? "•••" : formatPrl(snap!.balance, 4)} <small>PRL</small>
+        </p>
+      </div>
+      {snap && price && !hidden && <p className="muted">{usd(prlToNumber(snap.balance) * price)}</p>}
+      {snap && snap.immature > 0n && !hidden && <p className="muted small">plus {formatPrl(snap.immature)} PRL mined, spendable after 100 blocks</p>}
+      <div className="actions three">
+        <button className="btn primary" onClick={() => open({ kind: "send" })}>
+          Send
+        </button>
+        <button className="btn" onClick={() => open({ kind: "receive" })}>
+          Receive
+        </button>
+        <button className="btn" onClick={() => open({ kind: "trade", side: "buy" })}>
+          Buy
+        </button>
+      </div>
+      <section className="pricecard">
+        <div className="row-head">
+          <h3>Your PRL over time</h3>
+          {move !== null && !hidden && (
+            <span className={`delta ${move >= 0 ? "up" : "dn"}`}>
+              {move >= 0 ? "+" : "-"}
+              {fmt(Math.abs(move))}
+            </span>
+          )}
+        </div>
+        {hidden ? (
+          <div className="chart empty">Balances are hidden (Settings → Privacy).</div>
+        ) : (
+          <Chart points={points} format={fmt} label={inUsd ? "Value of your PRL in dollars" : "Your PRL balance"} />
+        )}
+        <div className="periods wide">
+          {VALUE_PERIODS.map((p) => (
+            <button key={p.id} className={period === p.id ? "on" : ""} onClick={() => setPeriod(p.id)}>
+              {p.id}
+            </button>
+          ))}
+        </div>
+        <p className="muted small">
+          {inUsd ? "What the PRL you held was worth at each moment, at that moment's price. " : "How many PRL this wallet held. "}
+          Worked out from this wallet's own payments; only the coins Keshi knows about are counted.
+        </p>
+      </section>
+      <Watched net={net} price={price} hidden={hidden} reloadKey={snap?.updated} snap={snap} secrets={secrets} />
+    </div>
+  );
+}
+
+interface WatchedAddress {
+  name: string;
+  address: string;
+}
+
+/** Addresses followed without their keys: a mining payout address, another wallet. Read only, nothing can be spent from here. */
+function Watched({ net, price, hidden, reloadKey, snap, secrets }: { net: core.Network; price: number | null; hidden: boolean; reloadKey?: number; snap?: Ctx["snap"]; secrets: core.Secrets }) {
+  const [list, setList] = useState<WatchedAddress[]>([]);
+  // This wallet's own addresses (receive, change, mining, quantum-ready): already in the balance, so not worth watching.
+  const [pqAddress, setPqAddress] = useState<string | null>(null);
+  useEffect(() => {
+    store.quantumAddress(secrets, net).then((p) => setPqAddress(p?.address ?? null)).catch(() => setPqAddress(null));
+  }, [secrets, net.id]);
+  const isOwn = (a: string) => {
+    const x = a.toLowerCase();
+    if (core.accountOf(secrets, net).derive(false, 0).address.toLowerCase() === x) return true;
+    if (pqAddress?.toLowerCase() === x) return true;
+    if (!snap) return false;
+    return [...snap.addresses.map((d) => d.address), snap.receive.address, snap.changeAddr.address].some((o) => o.toLowerCase() === x);
+  };
+  const [balances, setBalances] = useState<Record<string, bigint | null>>({});
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [address, setAddress] = useState("");
+  const [error, setError] = useState("");
+  const [copied, copy] = useCopy();
+  useEffect(() => {
+    local.get<WatchedAddress[]>("watched").then((w) => setList(w ?? []));
+  }, []);
+  useEffect(() => {
+    if (!list.length) return;
+    const idx = new core.Indexer(net);
+    for (const w of list)
+      idx
+        .address(w.address, false)
+        .then((i) => setBalances((b) => ({ ...b, [w.address]: i.balance + i.unconfirmed })))
+        .catch(() => setBalances((b) => ({ ...b, [w.address]: b[w.address] ?? null })));
+  }, [list, net.id, reloadKey]);
+  const save = async (next: WatchedAddress[]) => {
+    setList(next);
+    await local.set("watched", next);
+  };
+  const add = () => {
+    const a = address.trim();
+    if (!core.isValidAddress(a, net)) return setError(`That is not a valid ${net.hrp}1… address`);
+    if (list.some((w) => w.address === a)) return setError("You already watch this address");
+    if (isOwn(a)) return setError("This is one of your own addresses: it is already in your balance.");
+    setError("");
+    save([...list, { name: name.trim() || `Watched ${list.length + 1}`, address: a }]);
+    setName("");
+    setAddress("");
+    setAdding(false);
+  };
+  const total = list.reduce((s, w) => s + (balances[w.address] ?? 0n), 0n);
+  return (
+    <section>
+      <div className="row-head">
+        <h3>Watched addresses</h3>
+        {list.length > 0 && !hidden && <span className="muted small">{formatPrl(total, 2)} PRL</span>}
+      </div>
+      <p className="muted small">Follow any Pearl address without its keys: a mining payout address, a cold wallet, a friend. Keshi only reads its balance; nothing can be spent from here, and these coins are not in your total.</p>
+      {list.length > 0 && (
+        <ul className="list watched">
+          {list.map((w) => {
+            const b = balances[w.address];
+            return (
+              <li key={w.address}>
+                <div className="row">
+                  <span className="main">
+                    <span>{w.name}</span>
+                    <small>{short(w.address, 10)}</small>
+                  </span>
+                  <span className="main end">
+                    <span className="amt">{hidden ? "•••" : b === undefined ? "···" : b === null ? "?" : `${formatPrl(b, 4)} PRL`}</span>
+                    <small>{hidden || !b || !price ? (b === null ? "could not be read" : "") : usd(prlToNumber(b) * price)}</small>
+                  </span>
+                </div>
+                <div className="tools">
+                  <button className="link" onClick={() => copy(w.address, w.address)} aria-label={`Copy ${w.name}`}>
+                    {copied === w.address ? "Copied" : "Copy address"}
+                  </button>
+                  <button className="link" onClick={() => save(list.filter((x) => x.address !== w.address))}>
+                    Remove
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {adding ? (
+        <>
+          <label className="field">
+            <span>Name</span>
+            <input value={name} placeholder="Mining payouts" onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>Address</span>
+            <input value={address} spellCheck={false} placeholder={`${net.hrp}1…`} onChange={(e) => setAddress(e.target.value.replace(/\s/g, ""))} />
+          </label>
+          {error && <p className="error">{error}</p>}
+          <div className="actions">
+            <button className="btn primary" onClick={add}>
+              Watch this address
+            </button>
+            <button className="btn" onClick={() => { setAdding(false); setError(""); }}>
+              Cancel
+            </button>
+          </div>
+        </>
+      ) : (
+        <button className="btn" onClick={() => setAdding(true)}>
+          Watch an address
+        </button>
+      )}
+    </section>
+  );
+}
+
 /** Send ETH or wPRL from the wallet's Ethereum address to another one. No Keshi fee. */
 function EthSend({ asset, secrets, price, onClose }: Ctx & { asset: EthAssetName; onClose: () => void }) {
   const own = useMemo(() => core.ethAccountOf(secrets).address, [secrets]);
@@ -4682,6 +5301,11 @@ function EthSend({ asset, secrets, price, onClose }: Ctx & { asset: EthAssetName
           <Row k="Ethereum fee" v={`up to ${core.formatEth(p.fee, 6)} ETH${feeUsd(p.fee) ? ` (${feeUsd(p.fee)})` : ""}`} />
           <Row k="Keshi fee" v="None" />
           {asset === "ETH" && <Row k="Total leaving your address" v={`up to ${core.formatEth(p.amount + p.fee, 6)} ETH`} />}
+          {hold && asset === "wPRL" && <Row k="Your wPRL after" v={<After from={`${formatPrl(hold.wprl, 4)} wPRL`} to={`${formatPrl(hold.wprl - p.amount < 0n ? 0n : hold.wprl - p.amount, 4)} wPRL`} />} />}
+          {hold && (() => {
+            const left = hold.eth - p.fee - (asset === "ETH" ? p.amount : 0n);
+            return <Row k="Your ETH after" v={<After from={`${fmtEth(hold.eth)} ETH`} to={`at least ${fmtEth(left < 0n ? 0n : left)} ETH`} />} />;
+          })()}
         </dl>
         {review.twin && (
           <p className="hint warn">

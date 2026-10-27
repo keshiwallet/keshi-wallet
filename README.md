@@ -2,7 +2,7 @@
 
 **Pure Pearl. Your keys.**
 
-Keshi is a self-custody wallet for Pearl ($PRL), free on Chrome. No account, no sign-up: your recovery phrase is created on your device and never leaves it.
+Keshi is a self-custody wallet for Pearl, free on Chrome. No account, no sign-up: your recovery phrase is created on your device and never leaves it.
 
 - Website: https://keshiwallet.com
 - Chrome Web Store: https://chromewebstore.google.com/detail/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb
@@ -15,7 +15,7 @@ Keshi is a self-custody wallet for Pearl ($PRL), free on Chrome. No account, no 
 - Keshi is independent. It is not made by Pearl Research Labs, and it is not related to keshi.io, an unrelated project with a similar name.
 - Nobody, not even us, can recover your recovery phrase. Nobody from Keshi will ever ask you for it.
 
-This repository holds the code of the Keshi browser extension, so you can read it and check it. Version in this repository: **1.0.2**, the version in the Chrome Web Store.
+This repository holds the code of the Keshi browser extension, so you can read it and check it. Version in this repository: **1.0.3**, the version in the Chrome Web Store.
 
 ## What it does
 
@@ -60,11 +60,11 @@ npm run build
 node verify.mjs
 ```
 
-You should see `All 17 files match Keshi 1.0.2.` The list of expected files and their SHA-256 hashes is in [`verify/chrome-1.0.2.sha256`](verify/chrome-1.0.2.sha256). It was made from the package uploaded to the Chrome Web Store, so a match means this code produces the same files as the Store package.
+You should see `All 17 files match Keshi 1.0.3.` The list of expected files and their SHA-256 hashes is in [`verify/chrome-1.0.3.sha256`](verify/chrome-1.0.3.sha256). It was made from the package uploaded to the Chrome Web Store, so a match means this code produces the same files as the Store package.
 
-The package that was uploaded, `keshi-chrome-1.0.2.zip`, is attached to the release of this repository. Its SHA-256 is
-`61d7b9502396fc48d823b34e6d8e9226ac62f32bc810d388734441f3cdb2c3d1`.
-A zip file records file dates, so a zip you rebuild yourself will have another hash; what matters is the files inside, and `verify.mjs` compares those.
+The package that was uploaded, `keshi-chrome-1.0.3.zip`, is attached to the release of this repository. Its SHA-256 is
+`f2df45c95d4975e210ea7d4aa801dd20e67aa6e954afa98f722d25a715a03604`.
+A zip also records file dates and order, so a zip you build yourself can have another SHA-256 even when every file inside is identical. What matters is the files inside, and `verify.mjs` compares those, one by one, against the Store package.
 
 Every push to this repository is also rebuilt and checked by GitHub itself: see the **Rebuild and verify** action in the Actions tab ([`.github/workflows/verify.yml`](.github/workflows/verify.yml)).
 
@@ -76,13 +76,13 @@ node verify.mjs "<folder>"
 
 The extension ID is `mmjkdbdkgikbhbgcmpaaahhjhmdknpnb`. In Chrome the folder is usually:
 
-- Windows: `%LOCALAPPDATA%\Google\Chrome\User Data\Default\Extensions\mmjkdbdkgikbhbgcmpaaahhjhmdknpnb\1.0.2_0`
-- macOS: `~/Library/Application Support/Google/Chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.2_0`
-- Linux: `~/.config/google-chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.2_0`
+- Windows: `%LOCALAPPDATA%\Google\Chrome\User Data\Default\Extensions\mmjkdbdkgikbhbgcmpaaahhjhmdknpnb\1.0.3_0`
+- macOS: `~/Library/Application Support/Google/Chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.3_0`
+- Linux: `~/.config/google-chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.3_0`
 
 (If you use another Chrome profile or another Chromium browser, the path starts differently.) Chrome adds a `_metadata` folder, which the script ignores, and may add one `update_url` line to `manifest.json`, which the script accepts and says so.
 
-A match shows that the Store package is made from this code. It does not show that the code has no bugs: Keshi has not been audited yet.
+A match shows that the Store package is made from this code. It does not show that the code has no bugs: Keshi has had outside reviews, but no professional security audit yet.
 
 ## What Keshi connects to
 
@@ -96,6 +96,8 @@ Keshi has no server of its own. The extension talks directly to these public ser
 | www.pearlscriptions.com | The PRL-20 token index |
 | api.pearlbridge.xyz | Bridge PRL to Ethereum and back |
 | ethereum-rpc.publicnode.com, eth.drpc.org, eth.blockscout.com | Ethereum balances, history, swaps and sends |
+| lifi.keshiwallet.com | Keshi's relay to LI.FI for quotes and progress when buying wPRL with USDT from another chain. It only forwards those two read-only requests and holds Keshi's LI.FI key (code in `relay/`) |
+| arbitrum-one-rpc.publicnode.com, arbitrum.drpc.org, bsc-rpc.publicnode.com, bsc.drpc.org, polygon-bor-rpc.publicnode.com, polygon.drpc.org | Your USDT balance on Arbitrum, BNB Chain and Polygon, and the transaction that sends it |
 | www.bing.com, coindesk.com, cointelegraph.com, theblock.co, decrypt.co, cryptoslate.com, beincrypto.com | The news tab |
 
 Browser permissions: `storage` (your encrypted vault and settings stay on your device), `alarms` (the auto-lock timer and the incoming-payment check), `notifications` ("PRL received").

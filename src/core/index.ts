@@ -23,3 +23,5 @@ export * from "./pq";
 export * from "./news";
 export * from "./ethActivity";
 export * from "./ethsend";
+export * from "./history";
+export * from "./lifi";

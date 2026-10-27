@@ -113,7 +113,7 @@ input:not([type=checkbox]), textarea, select { width: 100%; border: 1px solid va
 input:focus, textarea:focus, select:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
 textarea { word-break: break-all; }
 .with-btn { display: flex; gap: 8px; }
-.with-btn button { border: 1px solid var(--line); border-radius: 12px; padding: 0 14px; font-weight: 600; }
+.with-btn button { border: 1px solid var(--line); border-radius: 12px; padding: 0 14px; font-weight: 600; white-space: nowrap; }
 .with-btn button.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; border: 1px solid var(--line); border-radius: 12px; padding: 3px; gap: 3px; }
@@ -507,3 +507,27 @@ h4.group { margin: 10px 0 0; font-size: 12.5px; font-weight: 600; }
 .wallet-actions { display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .wallet-actions .link { width: auto; display: inline-block; padding: 2px 0; font-size: 13px; color: var(--grit); text-align: left; }
 .wallet-actions .link:hover { color: var(--ink); }
+
+/* Balance before → after on confirmation screens */
+.after { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; align-items: baseline; }
+.after s { text-decoration: none; color: var(--grit); font-weight: 400; }
+.after i { font-style: normal; color: var(--grit); }
+.after b { font-weight: 600; }
+/* Watched addresses on the PRL screen */
+.list.watched li { padding: 9px 6px; }
+.list.watched .row { display: flex; align-items: center; gap: 10px; }
+.list.watched .tools { display: flex; gap: 14px; margin-top: 4px; }
+.list.watched .tools .link { width: auto; padding: 2px 0; font-size: 12.5px; }
+.actions.three { grid-template-columns: 1fr 1fr 1fr; }
+.list.watched { margin-top: 4px; }
+/* Buy: the two ways to pay */
+.seg.paytabs button { padding: 8px 4px; }
+.seg.paytabs button small { font-size: 11px; }
+.link.inline { display: inline; padding: 0; font-size: inherit; }
+
+/* Buy with USDT: first-time explanation */
+.card.intro { gap: 8px; }
+.card.intro .btn { align-self: flex-start; }
+.steps3 { list-style: decimal; margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.steps3 li::marker { color: var(--mint, #8ef0d6); font-weight: 600; }
+.check em { font-style: normal; font-size: 12px; }

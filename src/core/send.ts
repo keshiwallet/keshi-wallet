@@ -202,8 +202,16 @@ export function speedUpPlan(
   tx: { txid: string; confirmations: number; fees?: string; vsize?: number; vin: { txid?: string; vout?: number; sequence?: number; addresses?: string[]; value?: string }[]; vout: { n: number; addresses?: string[]; value?: string; spent?: boolean }[] },
   snap: Snapshot,
   newRate: number,
+  approved?: { inputs: string[]; change: string; changeAddress: string },
 ): Plan {
   if (tx.confirmations > 0) throw new Error("This payment is already confirmed");
+  // The coins and the change are taken from what this device approved, when known: the indexer's copy only says whether it is still waiting.
+  if (approved) {
+    const got = tx.vin.map((i) => `${i.txid}:${i.vout}=${BigInt(i.value ?? "0")}`).sort().join("|");
+    if (got !== [...approved.inputs].sort().join("|")) throw new Error("The network's copy of this payment spends other coins than the ones you approved. Nothing was changed.");
+    const ch = tx.vout.find((o) => o.addresses?.length === 1 && o.addresses[0] === approved.changeAddress);
+    if (!ch || BigInt(ch.value ?? "0") !== BigInt(approved.change)) throw new Error("The network's copy of this payment does not match what you sent. Nothing was changed.");
+  }
   // Replacing it would cancel whatever already spends it (a later payment, a token mint's second step).
   if (tx.vout.some((o) => (o as { spent?: boolean }).spent)) throw new Error("A later payment already builds on this one, so it cannot be sped up. It will confirm with it.");
   const mine = new Map(snap.addresses.map((a) => [a.address, a]));

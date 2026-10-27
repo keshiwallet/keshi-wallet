@@ -88,10 +88,15 @@ async function handle(msg: { id: unknown; method: unknown; params: any; active?:
       break;
     }
     case "signMessage":
-    case "sendPayment":
+    case "sendPayment": {
       // Same answer whether locked or not: a site that is not connected learns nothing.
       if (!site) return { error: "Connect first" };
+      // Like connecting: only right after a click, and not again for a minute after a refusal. A site cannot nag.
+      if (msg.active === false) return { error: "Keshi opens only after you click on the site." };
+      const until = await session.get<number>(coolKey(origin));
+      if (typeof until === "number" && until > Date.now()) return { error: "The user rejected the request" };
       break;
+    }
     default:
       return { error: "Unknown method" };
   }
@@ -120,7 +125,7 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
   for (const r of await waiting()) {
     if (r.windowId !== windowId) continue;
     await session.remove(REQ + r.id);
-    if (r.method === "connect") await session.set(coolKey(r.origin), Date.now() + COOL_DOWN);
+    await session.set(coolKey(r.origin), Date.now() + COOL_DOWN);
     chrome.tabs.sendMessage(r.tabId, { keshi: "response", id: r.pageId, origin: r.origin, error: "The user rejected the request" }).catch(() => {});
   }
 });
@@ -148,7 +153,8 @@ chrome.alarms.onAlarm.addListener(async () => {
         type: "basic",
         iconUrl: chrome.runtime.getURL("icon/128.png"),
         title: "PRL received",
-        message: `+${formatPrl(total - watch.received)} PRL arrived in your wallet.`,
+        // With the balance hidden in Keshi, the amount stays out of the system's notification centre too.
+        message: (await getSettings()).hideBalance ? "PRL arrived in your wallet." : `+${formatPrl(total - watch.received)} PRL arrived in your wallet.`,
       });
       await local.set("watch", { ...watch, received: total });
     }

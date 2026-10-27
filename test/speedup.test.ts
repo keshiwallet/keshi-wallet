@@ -84,6 +84,17 @@ describe("speed up a waiting payment", () => {
     expect(tight.change).toBeGreaterThan(0n);
     expect(() => c.speedUpPlan(info, snap, 9_000)).toThrow(/too small/);
   });
+  it("rebuilds only from the coins this device approved: an indexer naming another coin of the wallet cannot make a second payment", () => {
+    const approved = { inputs: p.inputs.map((u) => `${u.txid}:${u.vout}=${u.value}`), change: p.change.toString(), changeAddress: p.changeAddress };
+    expect(c.speedUpPlan(indexed(), snap, 20, approved).to).toBe(dest);
+    // Same outputs, but the input swapped for another real coin of the wallet: the "replacement" would not conflict, and the recipient would be paid twice.
+    const swapped = { ...indexed(), vin: [{ ...indexed().vin[0]!, txid: "22".repeat(32) }] };
+    expect(() => c.speedUpPlan(swapped, snap, 20, approved)).toThrow(/other coins/);
+    // Change under-reported: the fee would be inflated.
+    const under = indexed();
+    under.vout = under.vout.map((o) => (o.addresses[0] === chg.address ? { ...o, value: String(BigInt(o.value) - 1_00000000n) } : o));
+    expect(() => c.speedUpPlan(under, snap, 20, approved)).toThrow(/does not match/);
+  });
 });
 
 describe("full history", () => {
@@ -99,4 +110,5 @@ describe("full history", () => {
     expect(info.txs).toHaveLength(2010);
     expect(seen).toHaveLength(3);
   });
+
 });

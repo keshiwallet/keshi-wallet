@@ -1,4 +1,5 @@
 import * as core from "../core";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import { local, session, getSettings, setDataKey, newDataKey, label, type Settings, type Site } from "../ext/platform";
 
 // Everything the screens need from the wallet engine, in one place.
@@ -307,12 +308,25 @@ export interface SentRecord {
   amount: string;
   serviceAddress?: string;
   serviceFee: string;
+  /** The coins this device spent ("txid:vout=value") and the change it kept: a speed-up is rebuilt from these, never from the network's copy. */
+  inputs?: string[];
+  change?: string;
+  changeAddress?: string;
 }
 
 async function rememberSent(net: core.Network, txid: string, p: core.Plan): Promise<void> {
   const key = "sent:" + net.id;
   const list = (await local.get<SentRecord[]>(key)) ?? [];
-  const rec: SentRecord = { txid, to: p.to, amount: p.amount.toString(), serviceAddress: p.serviceAddress, serviceFee: p.serviceFee.toString() };
+  const rec: SentRecord = {
+    txid,
+    to: p.to,
+    amount: p.amount.toString(),
+    serviceAddress: p.serviceAddress,
+    serviceFee: p.serviceFee.toString(),
+    inputs: p.inputs.map((u) => `${u.txid}:${u.vout}=${u.value}`),
+    change: p.change.toString(),
+    changeAddress: p.changeAddress,
+  };
   await local.set(key, [rec, ...list.filter((r) => r.txid !== txid)].slice(0, 100));
 }
 
@@ -809,16 +823,105 @@ export async function bridgeDepositAddress(eth: string, net: core.Network): Prom
   return address;
 }
 
-export const crossings = async (): Promise<Crossing[]> => (await local.get<Crossing[]>("crossings")) ?? [];
+/** Crossings of one account only: each record carries the Ethereum address it belongs to. */
+export const crossings = async (eth: string): Promise<Crossing[]> => ((await local.get<Crossing[]>("crossings")) ?? []).filter((c) => c.eth.toLowerCase() === eth.toLowerCase());
 export async function addCrossing(c: Crossing): Promise<void> {
-  await local.set("crossings", [c, ...(await crossings())].slice(0, 30));
+  const all = (await local.get<Crossing[]>("crossings")) ?? [];
+  // Up to 30 per account, so a busy account never pushes another one's records out.
+  const mine = [c, ...all.filter((x) => x.eth.toLowerCase() === c.eth.toLowerCase())].slice(0, 30);
+  await local.set("crossings", [...mine, ...all.filter((x) => x.eth.toLowerCase() !== c.eth.toLowerCase())]);
 }
 
-/** Addresses the user already deals with: their own, their contacts, and past recipients. */
+/* ------------------------------------------------- Buying with USDT elsewhere */
+
+/** What the wallet's address holds on a source chain: its USDT and the coin that pays fees there. */
+export async function usdtSource(secrets: core.Secrets, chain: core.SourceChain): Promise<{ address: string; usdt: bigint; gas: bigint }> {
+  const { address } = core.ethAccountOf(secrets);
+  const rpc = new core.EthRpc(undefined, chain.rpcs);
+  const [usdt, gas] = await Promise.all([rpc.tokenBalance(chain.usdt.address, address), rpc.ethBalance(address)]);
+  return { address, usdt, gas };
+}
+
+export interface UsdtPurchase {
+  txHash: string;
+  chain: core.SourceChain["id"];
+  /** USDT sent, in the chain's smallest unit. */
+  amount: bigint;
+  /** What was bought: wPRL, or ETH for the return to Pearl. */
+  to: "wprl" | "eth";
+  expected: bigint;
+  at: number;
+  /** The address that paid: purchases are shown to that account only. */
+  from: string;
+  done?: boolean;
+  /** How it ended, kept for good: a failure or a refund must never turn into a neutral "Finished". */
+  outcome?: "arrived" | "partial" | "refunded" | "failed";
+}
+
+/** Purchases of one account only. Records without a payer (none were ever published) are not shown. */
+export async function usdtPurchases(from: string): Promise<UsdtPurchase[]> {
+  return ((await local.get<UsdtPurchase[]>("lifi")) ?? []).filter((p) => p.from?.toLowerCase() === from.toLowerCase());
+}
+export async function recordPurchase(p: UsdtPurchase): Promise<void> {
+  const all = ((await local.get<UsdtPurchase[]>("lifi")) ?? []).filter((x) => x.txHash !== p.txHash);
+  const same = (x: UsdtPurchase) => x.from?.toLowerCase() === p.from.toLowerCase();
+  await local.set("lifi", [p, ...all.filter(same).slice(0, 29), ...all.filter((x) => !same(x))]);
+}
+
+/** The lasting outcome of a LI.FI status, or nothing while it is still moving. */
+export function purchaseOutcome(s: core.LifiStatus): UsdtPurchase["outcome"] | undefined {
+  if (s.status === "DONE") return s.substatus === "PARTIAL" ? "partial" : s.substatus === "REFUNDED" ? "refunded" : "arrived";
+  if (s.status === "FAILED") return "failed";
+  return undefined;
+}
+
+/**
+ * Carry out a LI.FI quote on the source chain: allow LI.FI's contract to take
+ * the exact USDT amount when needed, then send the transaction LI.FI prepared.
+ * The second signature only happens once the first is confirmed, so the user
+ * can never be left with a stray permission and nothing sent.
+ */
+export async function buyWithUsdt(secrets: core.Secrets, chain: core.SourceChain, q: core.LifiQuote, asked: bigint, onStep: (text: string) => void): Promise<string> {
+  if (Date.now() - q.at > 5 * core.QUOTE_LIFETIME_MS) throw new Error("This quote has expired. Ask for a fresh one; nothing was sent.");
+  // The function that signs checks for itself: the quote must be for this chain and for exactly the USDT the user typed.
+  if (q.fromChainId !== chain.chainId || q.tx.chainId !== chain.chainId) throw new Error("Refused: this quote is for another chain. Nothing was sent.");
+  if (q.fromAmount !== asked) throw new Error("Refused: the quote spends a different amount of USDT than you entered. Nothing was sent.");
+  if (q.tx.to.toLowerCase() !== core.LIFI_DIAMOND.toLowerCase()) throw new Error("Refused: the transaction does not go to LI.FI's contract.");
+  const acct = core.ethAccountOf(secrets);
+  const rpc = new core.EthRpc(undefined, chain.rpcs);
+  const gasError = (e: unknown) => (e instanceof Error && /insufficient funds|gas required exceeds|exceeds the balance/i.test(e.message) ? new Error(`Not enough ${chain.gas} on your address on ${chain.name} to pay its network fee`) : e);
+  const [balance, allowance] = await Promise.all([rpc.tokenBalance(chain.usdt.address, acct.address), q.approvalAddress ? rpc.allowance(chain.usdt.address, acct.address, q.approvalAddress) : Promise.resolve(q.fromAmount)]);
+  if (balance < q.fromAmount) throw new Error(`Not enough USDT on your address on ${chain.name}`);
+  if (allowance < q.fromAmount) {
+    onStep(`Step 1 of 2: allowing LI.FI to take ${core.formatUnits(q.fromAmount, chain.usdt.decimals, 2)} USDT…`);
+    try {
+      const tx = await rpc.prepare(acct.address, chain.usdt.address, core.callData.approve(q.approvalAddress, q.fromAmount), 0n, chain.limits);
+      const signed = core.signEthTx(tx, acct.privateKey, chain.chainId);
+      const hash = await rpc.send(signed.raw, signed.hash);
+      if (!(await rpc.wait(hash))) throw new Error("The permission step was rejected. No USDT was moved.");
+    } catch (e) {
+      throw gasError(e);
+    }
+  }
+  onStep(allowance < q.fromAmount ? "Step 2 of 2: sending your USDT through LI.FI…" : "Sending your USDT through LI.FI…");
+  try {
+    const data = hexToBytes(q.tx.data.slice(2));
+    const tx = await rpc.prepare(acct.address, q.tx.to, data, q.tx.value, { ...chain.limits, minGas: q.tx.gasLimit ?? undefined });
+    const signed = core.signEthTx(tx, acct.privateKey, chain.chainId);
+    const hash = await rpc.send(signed.raw, signed.hash);
+    await recordPurchase({ txHash: hash, chain: chain.id, amount: q.fromAmount, to: q.toSymbol.toUpperCase() === "WPRL" ? "wprl" : "eth", expected: q.toAmount, at: Date.now(), from: acct.address });
+    return hash;
+  } catch (e) {
+    throw gasError(e);
+  }
+}
+
+/** Addresses the user already deals with: their own, their contacts, the addresses they watch, and past recipients. */
 export async function knownAddresses(snap: core.Snapshot | null): Promise<string[]> {
   const contacts = (await local.get<{ address: string }[]>("contacts")) ?? [];
+  const watched = (await local.get<{ address: string }[]>("watched")) ?? [];
   const sent = snap?.activity.filter((a) => a.kind === "sent" && a.counterparty).map((a) => a.counterparty!) ?? [];
-  return [...new Set([...contacts.map((c) => c.address), ...sent, ...(snap?.addresses.map((a) => a.address) ?? [])])];
+  return [...new Set([...contacts.map((c) => c.address), ...watched.map((w) => w.address), ...sent, ...(snap?.addresses.map((a) => a.address) ?? [])])];
 }
 
 /** Transactions this wallet made itself (mints), which must never be flagged as suspicious. */

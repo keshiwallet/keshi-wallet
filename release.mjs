@@ -4,7 +4,7 @@
 // their ceilings, the right version everywhere. Run: npm run release
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const fail = (why) => {
@@ -21,6 +21,9 @@ if (pkg.version !== version) fail(`package.json says ${pkg.version}, the manifes
 if (!/^prl1p[a-z0-9]{58}$/.test(fees.feeAddress)) fail("fees.config.json has no valid Pearl fee address.");
 if (!/^0x[0-9a-fA-F]{40}$/.test(fees.ethFeeAddress)) fail("fees.config.json has no valid Ethereum fee address.");
 if (!(fees.swapPercent <= 1)) fail("the swap fee is above 1%.");
+if (!((fees.usdtBuyPercent ?? 0) <= 1)) fail("the USDT purchase fee is above 1%.");
+if (fees.lifiApiKey) fail("fees.config.json must not contain the LI.FI key: put it in lifi.key (ignored by git).");
+if (process.env.KESHI_LIFI_DIRECT && !process.env.KESHI_LIFI_KEY && !existsSync("lifi.key")) fail("a direct build needs a LI.FI key (lifi.key or KESHI_LIFI_KEY).");
 for (const k of ["sendPercent", "combinePercent", "bridgePercent"]) if (!((fees[k] ?? 0) <= 3)) fail(`${k} is above 3%.`);
 
 execFileSync(process.execPath, ["build.mjs"], { stdio: "inherit" });
@@ -48,8 +51,26 @@ mkdirSync("release");
 const sums = [];
 for (const target of ["chrome", "firefox"]) {
   const name = `keshi-${target}-${version}.zip`;
-  execFileSync("zip", ["-qr", "-X", join("..", "..", "release", name), "."], { cwd: `dist/${target}` });
+  // Reproducible zip: every file dated 1 January 2026, listed in a fixed order, no folder entries and no
+  // extra attributes. The same code then gives the same zip, byte for byte, with Info-ZIP's zip.
+  const files = [];
+  const walk = (d, rel = "") => {
+    for (const n of readdirSync(join(`dist/${target}`, rel)).sort()) {
+      const r = rel ? `${rel}/${n}` : n;
+      if (statSync(join(`dist/${target}`, r)).isDirectory()) walk(d, r);
+      else files.push(r);
+    }
+  };
+  walk(`dist/${target}`);
+  const when = new Date("2026-01-01T00:00:00Z");
+  for (const f of files) utimesSync(join(`dist/${target}`, f), when, when);
+  try {
+    execFileSync("zip", ["-q", "-X", "-D", join("..", "..", "release", name), ...files.sort()], { cwd: `dist/${target}`, env: { ...process.env, TZ: "UTC" } });
+  } catch (e) {
+    if (e.code === "ENOENT") fail("the zip program is missing. Install it first (Debian/Ubuntu: sudo apt install zip; macOS has it; Windows: use WSL or Git Bash with zip).");
+    throw e;
+  }
   sums.push(`${createHash("sha256").update(readFileSync(`release/${name}`)).digest("hex")}  ${name}`);
 }
 writeFileSync("release/SHA256SUMS.txt", sums.join("\n") + "\n");
-console.log(`\nRelease ${version} ready in release/:\n${sums.join("\n")}\nFees: swap ${fees.swapPercent}%, bridge ${fees.bridgePercent}% (max ${fees.bridgeCapPrl} PRL), combine ${fees.combinePercent}% (max ${fees.combineCapPrl} PRL), mint ${fees.mintFlatPrl} PRL.`);
+console.log(`\nRelease ${version} ready in release/:\n${sums.join("\n")}\nFees: swap ${fees.swapPercent}%, USDT buy ${fees.usdtBuyPercent ?? fees.swapPercent}%, bridge ${fees.bridgePercent}% (max ${fees.bridgeCapPrl} PRL), combine ${fees.combinePercent}% (max ${fees.combineCapPrl} PRL), mint ${fees.mintFlatPrl} PRL.`);

@@ -103,9 +103,9 @@ export interface EthTx {
   data: Uint8Array;
 }
 
-/** Sign an EIP-1559 transaction for Ethereum mainnet. Returns the raw transaction and its hash. */
-export function signEthTx(tx: EthTx, privateKey: Uint8Array): { raw: string; hash: string } {
-  const fields: Rlp[] = [beBytes(ETH_CHAIN_ID), beBytes(tx.nonce), beBytes(tx.maxPriorityFeePerGas), beBytes(tx.maxFeePerGas), beBytes(tx.gasLimit), hexToBytes(tx.to.slice(2)), beBytes(tx.value), tx.data, []];
+/** Sign an EIP-1559 transaction for Ethereum mainnet, or for another EVM chain when `chainId` is given. Returns the raw transaction and its hash. */
+export function signEthTx(tx: EthTx, privateKey: Uint8Array, chainId: bigint = ETH_CHAIN_ID): { raw: string; hash: string } {
+  const fields: Rlp[] = [beBytes(chainId), beBytes(tx.nonce), beBytes(tx.maxPriorityFeePerGas), beBytes(tx.maxFeePerGas), beBytes(tx.gasLimit), hexToBytes(tx.to.slice(2)), beBytes(tx.value), tx.data, []];
   const digest = keccak_256(concatBytes(Uint8Array.of(2), rlp(fields)));
   const sig = secp256k1.sign(digest, privateKey, { prehash: false, format: "recovered" });
   const recovery = sig[0]!;
@@ -157,6 +157,20 @@ export class EthRpc {
   async gasPrice(): Promise<bigint> {
     return BigInt(await this.call("eth_gasPrice", []));
   }
+  /** The lowest gas price any of the servers reports: a hostile server can only make fees look cheaper, never dearer. */
+  async gasPriceMin(): Promise<bigint> {
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_gasPrice", params: [] });
+    const answers = await Promise.allSettled(
+      this.urls.map(async (url) => {
+        const j = await (await this.fetcher(url, { method: "POST", headers: { "content-type": "application/json" }, body })).json();
+        if (!j || j.error || typeof j.result !== "string") throw new Error("bad");
+        return BigInt(j.result);
+      }),
+    );
+    const prices = answers.flatMap((a) => (a.status === "fulfilled" && a.value > 0n ? [a.value] : []));
+    if (!prices.length) throw new Error("Could not read this network's current fee. Try again in a moment.");
+    return prices.reduce((m, p) => (p < m ? p : m));
+  }
   private async read(to: string, data: Uint8Array): Promise<bigint> {
     const r = await this.call("eth_call", [{ to, data: "0x" + bytesToHex(data) }, "latest"]);
     return r && r !== "0x" ? BigInt(r) : 0n;
@@ -203,8 +217,12 @@ export class EthRpc {
     return { min, max };
   }
 
-  /** Fill in nonce, gas and fees for a contract call. */
-  async prepare(from: string, to: string, data: Uint8Array, value = 0n): Promise<EthTx> {
+  /**
+   * Fill in nonce, gas and fees for a contract call. `limits` loosens the Ethereum
+   * ceilings for other chains: Arbitrum counts gas differently, and BNB Chain
+   * reports a zero base fee, so its gas price is used instead.
+   */
+  async prepare(from: string, to: string, data: Uint8Array, value = 0n, limits: { maxGas?: bigint; zeroBaseFee?: boolean; minGas?: bigint; maxGasPrice?: bigint; minTip?: bigint; maxTip?: bigint } = {}): Promise<EthTx> {
     const [nonce, gas, tip, block] = await Promise.all([
       this.call("eth_getTransactionCount", [from, "pending"]),
       this.call("eth_estimateGas", [{ from, to, data: "0x" + bytesToHex(data), ...(value > 0n ? { value: hex(value) } : {}) }]),
@@ -214,12 +232,30 @@ export class EthRpc {
     // These numbers come from a public server. They are bounded here so that
     // a wrong or hostile answer cannot burn the user's ETH as fees.
     const base = BigInt(block?.baseFeePerGas ?? "0x0");
-    if (base <= 0n) throw new Error("Could not read Ethereum's current fee. Try again in a moment.");
-    if (base > MAX_BASE_FEE) throw new Error("Ethereum fees are extremely high right now. Nothing was sent; try again later.");
     const estimate = BigInt(gas);
-    if (estimate > MAX_GAS) throw new Error("This transaction would use an abnormal amount of gas. Nothing was sent.");
-    const priority = BigInt(tip) > MAX_TIP ? MAX_TIP : BigInt(tip);
-    return { nonce: BigInt(nonce), gasLimit: (estimate * 12n) / 10n, maxPriorityFeePerGas: priority, maxFeePerGas: base * 2n + priority, to, value, data };
+    const maxGas = limits.maxGas ?? MAX_GAS;
+    if (estimate > maxGas) throw new Error("This transaction would use an abnormal amount of gas. Nothing was sent.");
+    let gasLimit = (estimate * 12n) / 10n;
+    // A gas limit suggested by a server is honoured only within the wallet's own ceiling.
+    if (limits.minGas && gasLimit < limits.minGas) gasLimit = limits.minGas > maxGas ? maxGas : limits.minGas;
+    const tooExpensive = "This network's fees are far above normal right now. Nothing was sent; try again later.";
+    if (base <= 0n && limits.zeroBaseFee) {
+      // Chains without a base fee: pay the going gas price, with a small margin. Every server is asked
+      // and the lowest answer is used, so one dishonest server cannot inflate the fee.
+      const price = await this.gasPriceMin();
+      if (price <= 0n) throw new Error("Could not read this network's current fee. Try again in a moment.");
+      if (price > (limits.maxGasPrice ?? MAX_BASE_FEE)) throw new Error(tooExpensive);
+      return { nonce: BigInt(nonce), gasLimit, maxPriorityFeePerGas: price, maxFeePerGas: (price * 12n) / 10n, to, value, data };
+    }
+    if (base <= 0n) throw new Error("Could not read Ethereum's current fee. Try again in a moment.");
+    if (base > (limits.maxGasPrice ?? MAX_BASE_FEE)) throw new Error(limits.maxGasPrice ? tooExpensive : "Ethereum fees are extremely high right now. Nothing was sent; try again later.");
+    let priority = BigInt(tip);
+    const maxTip = limits.maxTip ?? MAX_TIP;
+    if (priority > maxTip) priority = maxTip;
+    if (limits.minTip && priority < limits.minTip) priority = limits.minTip;
+    const maxFee = base * 2n + priority;
+    if (limits.maxGasPrice && maxFee > limits.maxGasPrice * 2n) throw new Error(tooExpensive);
+    return { nonce: BigInt(nonce), gasLimit, maxPriorityFeePerGas: priority, maxFeePerGas: maxFee, to, value, data };
   }
 
   /**
@@ -279,12 +315,15 @@ export const MIN_ETH_FOR_FEES = 500_000_000_000_000n; // 0.0005 ETH
  * the return itself), with room for the gas price to triple. Null when the
  * gas price cannot be read.
  */
+/** The most ETH the "ETH for fees" purchase will ever aim for: a hostile fee reading cannot turn it into a large buy. */
+export const MAX_BRIDGE_BACK_ETH = 10_000_000_000_000_000n; // 0.01 ETH
 export async function bridgeBackEthNeeded(rpc: EthRpc): Promise<bigint | null> {
   try {
-    const gas = await rpc.gasPrice();
+    const gas = await rpc.gasPriceMin();
     if (gas <= 0n) return null;
     const need = gas * 3n * (70_000n + 200_000n);
-    return need > MIN_ETH_FOR_FEES ? need : MIN_ETH_FOR_FEES;
+    const bounded = need > MAX_BRIDGE_BACK_ETH ? MAX_BRIDGE_BACK_ETH : need;
+    return bounded > MIN_ETH_FOR_FEES ? bounded : MIN_ETH_FOR_FEES;
   } catch {
     return null;
   }

@@ -5,7 +5,7 @@ import type { Network } from "./network";
 // The wallet provider's commission. Values come from fees.config.json at
 // build time. With no (valid) fee address, no commission is ever charged.
 
-declare const __KESHI_FEES__: { feeAddress: string; sendPercent: number; sendCapPrl: number; combinePercent: number; combineCapPrl: number; mintFlatPrl?: number; bridgePercent?: number; bridgeCapPrl?: number; ethFeeAddress?: string; swapPercent?: number } | undefined;
+declare const __KESHI_FEES__: { feeAddress: string; sendPercent: number; sendCapPrl: number; combinePercent: number; combineCapPrl: number; mintFlatPrl?: number; bridgePercent?: number; bridgeCapPrl?: number; ethFeeAddress?: string; swapPercent?: number; usdtBuyPercent?: number } | undefined;
 
 const cfg =
   typeof __KESHI_FEES__ !== "undefined" && __KESHI_FEES__
@@ -47,4 +47,11 @@ export function swapFee(config = cfg): { bips: bigint; recipient: string; label:
   if (!/^0x[0-9a-fA-F]{40}$/.test(a) || !(pct > 0) || pct > 1) return undefined; // the router itself refuses more than 1%
   if (!isEthAddress(a) || Math.round(pct * 100) < 1) return undefined; // bad checksum, or a rate that rounds to nothing
   return { bips: BigInt(Math.round(pct * 100)), recipient: a, label: `${Number(pct.toFixed(2))}%` };
+}
+
+/** Keshi's share when buying wPRL with USDT from another chain, asked of LI.FI and paid into its fee collector for the Keshi integration. */
+export function usdtBuyFee(config = cfg): { bips: bigint; recipient: string; label: string } | undefined {
+  const pct = config.usdtBuyPercent ?? config.swapPercent ?? 0;
+  const base = swapFee({ ...config, swapPercent: pct });
+  return base;
 }
