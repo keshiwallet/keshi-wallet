@@ -145,6 +145,28 @@ describe("history and mining", () => {
     expect(s.payouts.length).toBe(4);
     expect(c.payoutsCsv(s.payouts).split("\n").length).toBe(5);
   });
+  it("groups payouts per period: days, then weeks, then months, and values them at the price of each day", () => {
+    const now = new Date(2026, 9, 25, 12).getTime();
+    const sec = (daysAgo: number) => Math.floor((now - daysAgo * 86_400_000) / 1000);
+    const acts = [1, 2, 10, 40, 100, 200].map((d, i) => ({ txid: String(i).repeat(64), time: sec(d), confirmations: 9, net: 100n * 100_000_000n, fee: 0n, kind: "received" as const }));
+    const s7 = c.periodStats(acts, "7D", now);
+    expect(s7.buckets.length).toBe(7);
+    expect(s7.total).toBe(200n * 100_000_000n);
+    expect(s7.allTime).toBe(600n * 100_000_000n);
+    const s30 = c.periodStats(acts, "30D", now);
+    expect(s30.buckets.length).toBe(30);
+    expect(s30.total).toBe(300n * 100_000_000n);
+    const s90 = c.periodStats(acts, "90D", now);
+    expect(s90.buckets.length).toBeGreaterThan(10);
+    expect(s90.buckets.length).toBeLessThan(16);
+    expect(s90.total).toBe(400n * 100_000_000n);
+    const all = c.periodStats(acts, "All", now, [{ time: sec(300), value: 1 }, { time: sec(150), value: 2 }]);
+    expect(all.total).toBe(600n * 100_000_000n);
+    expect(all.buckets.length).toBe(7);
+    expect(all.buckets.reduce((n, b) => n + b.count, 0)).toBe(6);
+    // 200 days ago: price 1; the five later ones: price 2.
+    expect(all.thenUsd).toBe(100 * 1 + 500 * 2);
+  });
 });
 
 describe("message signing (BIP-322)", () => {

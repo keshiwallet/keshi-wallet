@@ -190,7 +190,7 @@ textarea { word-break: break-all; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 
 .seg.mini { display: inline-grid; padding: 2px; border-radius: 10px; }
-.seg.mini button { padding: 4px 10px; font-size: 12px; border-radius: 8px; flex-direction: row; }
+.seg.mini button { padding: 4px 10px; font-size: 12px; border-radius: 8px; flex-direction: row; white-space: nowrap; }
 .price .muted { font-weight: 600; font-size: 12px; }
 .chart-bar { display: flex; align-items: center; gap: 8px; }
 .periods { display: flex; gap: 2px; }
@@ -531,3 +531,28 @@ h4.group { margin: 10px 0 0; font-size: 12.5px; font-weight: 600; }
 .steps3 { list-style: decimal; margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .steps3 li::marker { color: var(--mint, #8ef0d6); font-weight: 600; }
 .check em { font-style: normal; font-size: 12px; }
+
+.seg.mini.periods { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; }
+.bars.nmany { gap: 3px; }
+.bars.nmany i { border-radius: 2px 2px 0 0; }
+.bars.nmany span { font-size: 10.5px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
+.grid2 > div { display: flex; flex-direction: column; gap: 2px; padding: 11px 12px; min-width: 0; }
+.grid2 > div:nth-child(odd) { border-right: 1px solid var(--line); }
+.grid2 > div:nth-child(n + 3) { border-top: 1px solid var(--line); }
+.grid2 strong { font: 500 19px/1.1 var(--display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-head.tight { min-height: 0; }
+.hash-big { font: 500 24px/1.1 var(--display); }
+/* Mining only. Names of their own: "dot" and "meter" already style the wallet list and the password strength meter. */
+.live-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 7px; background: var(--up); vertical-align: 1px; }
+.live-dot.off { background: var(--down); }
+.yield-meter { height: 8px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.yield-meter i { display: block; height: 100%; background: var(--up); border-radius: 99px; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.list.workers li { display: flex; align-items: center; gap: 10px; padding: 9px 6px; }
+.list.workers li + li { border-top: 1px solid var(--line); }
+/* Gains and losses on the Mining screens only: the plain names "up" and "down" are animation and button classes elsewhere. */
+.tone-up { color: var(--up); } .tone-down { color: var(--down); }
+.list.gpus li { display: flex; align-items: center; gap: 10px; padding: 8px 6px; }
+.list.gpus li + li { border-top: 1px solid var(--line); }
+.list.gpus .main small { white-space: normal; }

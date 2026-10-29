@@ -1,6 +1,6 @@
 import * as core from "../core";
 import { hexToBytes } from "@noble/hashes/utils.js";
-import { local, session, getSettings, setDataKey, newDataKey, label, type Settings, type Site } from "../ext/platform";
+import { local, session, getSettings, setDataKey, newDataKey, label, syncMinerAlert, type MinerWatch, type Settings, type Site } from "../ext/platform";
 
 // Everything the screens need from the wallet engine, in one place.
 
@@ -280,15 +280,37 @@ export async function quantumAddress(secrets: core.Secrets, net: core.Network): 
  * post-quantum key derived from the same recovery phrase. Takes a second or two.
  */
 export async function createQuantumAddress(secrets: core.Secrets, net: core.Network): Promise<StoredPq> {
-  if (secrets.key) throw new Error("This wallet was imported from a private key. Quantum-ready addresses need a recovery phrase.");
   const existing = await quantumAddress(secrets, net);
   if (existing) return existing;
+  const stored = deriveQuantumAddress(secrets, net);
+  await local.set(pqKey(secrets, net), stored);
+  return stored;
+}
+
+/** The wallet's quantum-ready address, worked out from the phrase (a second or two) without saving it. */
+function deriveQuantumAddress(secrets: core.Secrets, net: core.Network): StoredPq {
+  if (secrets.key) throw new Error("This wallet was imported from a private key. Quantum-ready addresses need a recovery phrase.");
   const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
   const internal = core.accountOf(secrets, net).derive(false, 0).pubkey;
   const pq = core.derivePqAddress(secrets.phrase, internal, net, false, 0, secrets.derivation ?? "standard", core.accountNumber(secrets));
-  const stored: StoredPq = { address: pq.address, leafScript: hex(pq.leafScript), merkleRoot: hex(pq.merkleRoot), controlBlock: hex(pq.controlBlock), xmssPublicKey: hex(pq.xmssPublicKey) };
-  await local.set(pqKey(secrets, net), stored);
-  return stored;
+  return { address: pq.address, leafScript: hex(pq.leafScript), merkleRoot: hex(pq.merkleRoot), controlBlock: hex(pq.controlBlock), xmssPublicKey: hex(pq.xmssPublicKey) };
+}
+
+/**
+ * Look for a quantum-ready address made with Keshi 1.0.3 or earlier, for example after restoring the phrase on a new
+ * device. Pearl retired that address design in its own wallet (pearld 1.5.5) ahead of a different post-quantum address
+ * type, so Keshi no longer offers to create one. An address that was used is kept, so its PRL stay in the balance and
+ * can be spent as usual; an unused one is not kept. Returns the address when it was used.
+ */
+export async function findOldQuantumAddress(secrets: core.Secrets, net: core.Network): Promise<StoredPq | null> {
+  const existing = await quantumAddress(secrets, net);
+  if (existing) return existing;
+  // Worked out first and kept only once the indexer says it was used: closing Keshi meanwhile leaves nothing behind.
+  const made = deriveQuantumAddress(secrets, net);
+  const info = await new core.Indexer(net).address(made.address, false);
+  if (!(info.txCount > 0 || info.balance > 0n || info.unconfirmed !== 0n)) return null;
+  await local.set(pqKey(secrets, net), made);
+  return made;
 }
 
 export async function pay(secrets: core.Secrets, net: core.Network, snap: core.Snapshot, p: core.Plan): Promise<string> {
@@ -779,6 +801,7 @@ export async function buyWithEth(secrets: core.Secrets, q: core.EthBuy, onStep: 
  * one otherwise. The permission is for this exact amount, never unlimited.
  */
 export async function bridgeBack(secrets: core.Secrets, amount: bigint, pearlAddress: string, onStep: (text: string) => void): Promise<string> {
+  if (!core.isValidAddress(pearlAddress, core.networkById("mainnet"))) throw new Error("Refused: the Pearl address for the return is not valid. Nothing was sent.");
   const acct = core.ethAccountOf(secrets);
   const rpc = new core.EthRpc();
   const [balance, allowance] = await Promise.all([rpc.tokenBalance(core.WPRL_CONTRACT, acct.address), rpc.allowance(core.WPRL_CONTRACT, acct.address, core.BRIDGE_CONTROLLER)]);
@@ -847,8 +870,11 @@ export interface UsdtPurchase {
   chain: core.SourceChain["id"];
   /** USDT sent, in the chain's smallest unit. */
   amount: bigint;
-  /** What was bought: wPRL, or ETH for the return to Pearl. */
-  to: "wprl" | "eth";
+  /**
+   * What was bought: USDT on Ethereum, swapped for wPRL in a second step (since 1.0.4), or ETH
+   * for fees. "wprl" is a one-step purchase made by 1.0.3.
+   */
+  to: "wprl" | "eth" | "usdt";
   expected: bigint;
   at: number;
   /** The address that paid: purchases are shown to that account only. */
@@ -856,6 +882,12 @@ export interface UsdtPurchase {
   done?: boolean;
   /** How it ended, kept for good: a failure or a refund must never turn into a neutral "Finished". */
   outcome?: "arrived" | "partial" | "refunded" | "failed";
+  /** USDT that arrived on Ethereum, as LI.FI reported it. */
+  received?: bigint;
+  /** The Uniswap swap that turned the USDT into wPRL, once it is in a block. */
+  swapped?: string;
+  /** A swap sent and not yet seen in a block: never sent twice while the network still has it. */
+  swapping?: string;
 }
 
 /** Purchases of one account only. Records without a payer (none were ever published) are not shown. */
@@ -870,7 +902,8 @@ export async function recordPurchase(p: UsdtPurchase): Promise<void> {
 
 /** The lasting outcome of a LI.FI status, or nothing while it is still moving. */
 export function purchaseOutcome(s: core.LifiStatus): UsdtPurchase["outcome"] | undefined {
-  if (s.status === "DONE") return s.substatus === "PARTIAL" ? "partial" : s.substatus === "REFUNDED" ? "refunded" : "arrived";
+  // Only LI.FI's known success counts as "arrived"; any other way of finishing is shown as "check what arrived".
+  if (s.status === "DONE") return s.substatus === "REFUNDED" ? "refunded" : !s.substatus || s.substatus === "COMPLETED" ? "arrived" : "partial";
   if (s.status === "FAILED") return "failed";
   return undefined;
 }
@@ -881,7 +914,7 @@ export function purchaseOutcome(s: core.LifiStatus): UsdtPurchase["outcome"] | u
  * The second signature only happens once the first is confirmed, so the user
  * can never be left with a stray permission and nothing sent.
  */
-export async function buyWithUsdt(secrets: core.Secrets, chain: core.SourceChain, q: core.LifiQuote, asked: bigint, onStep: (text: string) => void): Promise<string> {
+export async function buyWithUsdt(secrets: core.Secrets, chain: core.SourceChain, q: core.LifiQuote, asked: bigint, onStep: (text: string) => void, leg: "usdt" | "eth" = "usdt"): Promise<string> {
   if (Date.now() - q.at > 5 * core.QUOTE_LIFETIME_MS) throw new Error("This quote has expired. Ask for a fresh one; nothing was sent.");
   // The function that signs checks for itself: the quote must be for this chain and for exactly the USDT the user typed.
   if (q.fromChainId !== chain.chainId || q.tx.chainId !== chain.chainId) throw new Error("Refused: this quote is for another chain. Nothing was sent.");
@@ -908,11 +941,85 @@ export async function buyWithUsdt(secrets: core.Secrets, chain: core.SourceChain
     const data = hexToBytes(q.tx.data.slice(2));
     const tx = await rpc.prepare(acct.address, q.tx.to, data, q.tx.value, { ...chain.limits, minGas: q.tx.gasLimit ?? undefined });
     const signed = core.signEthTx(tx, acct.privateKey, chain.chainId);
-    const hash = await rpc.send(signed.raw, signed.hash);
-    await recordPurchase({ txHash: hash, chain: chain.id, amount: q.fromAmount, to: q.toSymbol.toUpperCase() === "WPRL" ? "wprl" : "eth", expected: q.toAmount, at: Date.now(), from: acct.address });
-    return hash;
+    // Written down before it leaves: if the answer is lost on the way back, the purchase is still in the list and followed.
+    const record: UsdtPurchase = { txHash: signed.hash, chain: chain.id, amount: q.fromAmount, to: leg, expected: q.toAmount, at: Date.now(), from: acct.address };
+    await recordPurchase(record);
+    try {
+      return await rpc.send(signed.raw, signed.hash);
+    } catch (e) {
+      // Taken off the list only when the network clearly refused it. Any other failure (a lost connection) may hide a
+      // transaction that did go out: it stays in the list, followed like the others, and the user is told so.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/insufficient|nonce|underpriced|exceeds|revert|intrinsic gas|fee cap|gas required/i.test(msg)) {
+        await forgetPurchase(signed.hash).catch(() => {});
+        throw e;
+      }
+      throw new Error(`Keshi could not confirm that your USDT purchase went out (${msg}). It is in the list below: wait a few minutes before buying again, so you do not buy twice.`);
+    }
   } catch (e) {
     throw gasError(e);
+  }
+}
+
+async function forgetPurchase(txHash: string): Promise<void> {
+  const all = (await local.get<UsdtPurchase[]>("lifi")) ?? [];
+  await local.set("lifi", all.filter((x) => x.txHash.toLowerCase() !== txHash.toLowerCase()));
+}
+
+/**
+ * USDT the second step may swap: what LI.FI says arrived, only when it says USDT arrived on Ethereum,
+ * and never more than 3% above what was quoted; then no more than the address holds. A wrong or
+ * hostile status can therefore never turn the user's other USDT into wPRL beyond this purchase.
+ */
+export function usdtToSwap(p: UsdtPurchase, held: bigint): bigint {
+  const ceiling = (p.expected * 103n) / 100n;
+  const want = p.received !== undefined && p.received > 0n && p.received < ceiling ? p.received : p.expected < ceiling ? p.expected : ceiling;
+  return held < want ? held : want;
+}
+
+/**
+ * Second step of a USDT purchase: swap the USDT that arrived on Ethereum for wPRL on Uniswap, from the
+ * wallet's own address (privately, through Flashbots, when that setting is on). Keshi's fee was taken on
+ * the first step, so none is taken here. `price` is today's PRL price from Keshi's own feeds: a Uniswap
+ * price 20% worse is refused, as on the first step.
+ */
+export async function finishUsdtPurchase(secrets: core.Secrets, shown: UsdtPurchase, onStep: (t: string) => void, price?: number | null): Promise<string> {
+  const acct = core.ethAccountOf(secrets);
+  // The stored record, not the one on screen: another window may have swapped it already.
+  const p = (await usdtPurchases(acct.address)).find((x) => x.txHash === shown.txHash);
+  if (!p || p.to !== "usdt") throw new Error("Unknown purchase.");
+  if (p.from.toLowerCase() !== acct.address.toLowerCase()) throw new Error("This purchase belongs to another account.");
+  if (p.swapped) throw new Error("This USDT was already swapped for wPRL.");
+  const rpc = new core.EthRpc();
+  if (p.swapping) {
+    // A swap went out earlier: finish its record, or wait for it, rather than send a second one.
+    const ended = await rpc.outcome(p.swapping);
+    if (ended === true) {
+      await recordPurchase({ ...p, swapped: p.swapping, swapping: undefined });
+      throw new Error("This USDT was already swapped for wPRL.");
+    }
+    // Refused in a block (the price moved): the USDT is still there and the swap can be tried again.
+    if (ended === false) await recordPurchase({ ...p, swapping: undefined });
+    else if (await rpc.knows(p.swapping)) throw new Error("Your swap is waiting for a block. Check again in a few minutes; nothing new was sent.");
+  }
+  if (!price) throw new Error("Keshi could not read today's PRL price to check the swap. Nothing was sent; try again in a moment.");
+  const held = await rpc.tokenBalance(core.USDT, acct.address);
+  const amount = usdtToSwap(p, held);
+  if (amount <= 0n) throw new Error("No USDT has arrived on your Ethereum address yet.");
+  onStep("Finding the best Uniswap price…");
+  const route = await core.findRoute(rpc, core.USDT, core.WPRL_CONTRACT, amount);
+  const paid = Number(amount) / 1e6;
+  const worth = (Number(route.amountOut) / 1e8) * price;
+  if (worth < paid * 0.8) throw new Error(`Uniswap's price is about ${Math.round((1 - worth / paid) * 100)}% under today's PRL price. Nothing was swapped; try again later.`);
+  try {
+    const hash = await core.swapRoute(rpc, acct, route, onStep, undefined, 100n, false, (sent) => recordPurchase({ ...p, swapping: sent }));
+    await recordPurchase({ ...p, swapped: hash, swapping: undefined });
+    return hash;
+  } catch (e) {
+    // A swap the network refused (price moved) leaves the USDT where it was: the button may be used again.
+    if (e instanceof Error && /was refused|dropped this transaction/i.test(e.message)) await recordPurchase({ ...p, swapping: undefined });
+    if (e instanceof Error && /insufficient funds/i.test(e.message)) throw new Error("Not enough ETH on your Ethereum address to pay the Ethereum fee of the swap");
+    throw e;
   }
 }
 
@@ -972,6 +1079,12 @@ export async function removeWallet(index: number, password: string): Promise<cor
         const sites = (await local.get<Record<string, Site>>("sites")) ?? {};
         const left = Object.fromEntries(Object.entries(sites).filter(([, s]) => !mine.has(s.address)));
         if (Object.keys(left).length !== Object.keys(sites).length) await local.set("sites", left);
+        // A miner followed at one of this wallet's addresses: stop following it, and drop the unencrypted alert copy.
+        const miner = await local.get<MinerWatch>("miner");
+        if (miner && mine.has(miner.address)) {
+          await local.remove("miner");
+          await syncMinerAlert(null);
+        }
         await local.remove(snapKey(gone, net));
         await local.remove(pqKey(gone, net));
       } catch {

@@ -12,6 +12,8 @@ export interface Activity {
   fee: bigint;
   kind: "received" | "sent" | "mined" | "moved";
   counterparty?: string;
+  /** The wallet's own addresses this transaction paid. */
+  to?: string[];
 }
 
 export interface Snapshot {
@@ -150,7 +152,8 @@ export function describe(tx: RawTx, mine: Set<string>): Activity {
     kind = "sent";
     counterparty = tx.vout.find((o) => !isMine(o.addresses))?.addresses?.[0];
   }
-  return { txid: tx.txid, time: tx.blockTime ?? 0, confirmations: tx.confirmations ?? 0, net, fee, kind, counterparty };
+  const to = [...new Set(tx.vout.flatMap((o) => (o.addresses ?? []).filter((a) => mine.has(a))))];
+  return { txid: tx.txid, time: tx.blockTime ?? 0, confirmations: tx.confirmations ?? 0, net, fee, kind, counterparty, to };
 }
 
 /* ------------------------------------------------------ suspicious payments */

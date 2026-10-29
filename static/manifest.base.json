@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Keshi Wallet for Pearl",
   "short_name": "Keshi",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Everything you do with Pearl (PRL) in one place: send, swap, bridge and mint in a few clicks. Your keys stay in your hands.",
   "icons": {
     "16": "icon/16.png",
@@ -22,6 +22,8 @@
   "host_permissions": [
     "https://blockbook.pearlresearch.ai/*",
     "https://blockbook.testnet.pearlresearch.ai/*",
+    "https://pool.kryptex.com/*",
+    "https://pearl.herominers.com/*",
     "https://safe.trade/*",
     "https://big.one/*",
     "https://api.coingecko.com/*",
@@ -29,6 +31,8 @@
     "https://api.pearlbridge.xyz/*",
     "https://ethereum-rpc.publicnode.com/*",
     "https://eth.drpc.org/*",
+    "https://rpc.flashbots.net/*",
+    "https://protect.flashbots.net/*",
     "https://li.quest/*",
     "https://arbitrum-one-rpc.publicnode.com/*",
     "https://arbitrum.drpc.org/*",
@@ -69,6 +73,6 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src https://blockbook.pearlresearch.ai https://blockbook.testnet.pearlresearch.ai https://safe.trade https://big.one https://api.coingecko.com https://www.pearlscriptions.com https://api.pearlbridge.xyz https://ethereum-rpc.publicnode.com https://eth.drpc.org https://li.quest https://arbitrum-one-rpc.publicnode.com https://arbitrum.drpc.org https://bsc-rpc.publicnode.com https://bsc.drpc.org https://polygon-bor-rpc.publicnode.com https://polygon.drpc.org https://eth.blockscout.com https://www.bing.com https://www.coindesk.com https://cointelegraph.com https://www.theblock.co https://decrypt.co https://cryptoslate.com https://beincrypto.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    "extension_pages": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src https://rpc.flashbots.net https://protect.flashbots.net https://blockbook.pearlresearch.ai https://blockbook.testnet.pearlresearch.ai https://pool.kryptex.com https://pearl.herominers.com https://safe.trade https://big.one https://api.coingecko.com https://www.pearlscriptions.com https://api.pearlbridge.xyz https://ethereum-rpc.publicnode.com https://eth.drpc.org https://li.quest https://arbitrum-one-rpc.publicnode.com https://arbitrum.drpc.org https://bsc-rpc.publicnode.com https://bsc.drpc.org https://polygon-bor-rpc.publicnode.com https://polygon.drpc.org https://eth.blockscout.com https://www.bing.com https://www.coindesk.com https://cointelegraph.com https://www.theblock.co https://decrypt.co https://cryptoslate.com https://beincrypto.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
   }
 }

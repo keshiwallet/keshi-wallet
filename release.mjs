@@ -26,6 +26,13 @@ if (fees.lifiApiKey) fail("fees.config.json must not contain the LI.FI key: put 
 if (process.env.KESHI_LIFI_DIRECT && !process.env.KESHI_LIFI_KEY && !existsSync("lifi.key")) fail("a direct build needs a LI.FI key (lifi.key or KESHI_LIFI_KEY).");
 for (const k of ["sendPercent", "combinePercent", "bridgePercent"]) if (!((fees[k] ?? 0) <= 3)) fail(`${k} is above 3%.`);
 
+// Nothing is packaged unless the type check and every test pass on this exact code.
+try {
+  execFileSync(process.execPath, ["node_modules/typescript/bin/tsc", "-p", "."], { stdio: "inherit" });
+  execFileSync(process.execPath, ["node_modules/vitest/vitest.mjs", "run"], { stdio: "inherit" });
+} catch {
+  fail("the type check or the tests failed.");
+}
 execFileSync(process.execPath, ["build.mjs"], { stdio: "inherit" });
 
 const files = (dir) => readdirSync(dir).flatMap((f) => (statSync(join(dir, f)).isDirectory() ? files(join(dir, f)) : [join(dir, f)]));

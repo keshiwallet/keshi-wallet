@@ -13,6 +13,86 @@ import { remoteText } from "./network";
 export const ETH_CHAIN_ID = 1n;
 const RPCS = ["https://ethereum-rpc.publicnode.com", "https://eth.drpc.org"];
 
+/**
+ * Flashbots Protect: swaps go straight to block builders instead of the public waiting room,
+ * so bots cannot see a swap coming and trade around it ("sandwich"). A swap that would fail is
+ * not included, so it costs nothing. Free, no account. Only swaps take this route: plain sends,
+ * permissions and bridge returns have nothing a bot could take, and stay visible to the public
+ * servers that work out the next transaction number.
+ */
+export const PRIVATE_RPC = "https://rpc.flashbots.net/fast";
+/** Status of a transaction sent through Flashbots Protect, while it is still private. */
+export const PRIVATE_STATUS = "https://protect.flashbots.net/tx/";
+let privateSend = true;
+/** Settings > Privacy > "Send Ethereum transactions privately". On by default. */
+export const setPrivateEthSend = (on: boolean): void => {
+  privateSend = on;
+};
+export const privateEthSend = (): boolean => privateSend;
+/** Lowest tip on Ethereum: Flashbots drops transactions that tip nothing. */
+const MIN_TIP = 10_000_000n; // 0.01 gwei
+
+/**
+ * Swaps sent privately and not yet in a block, by sender: public servers cannot see them, so the
+ * next transaction number is worked out here too. Kept in memory, and copied to the browser's session
+ * storage by the app (see keepPrivatePending), so closing and reopening Keshi does not forget them.
+ */
+const privatePending = new Map<string, { hash: string; nonce: bigint; at: number }>();
+let savePending: ((json: string) => void) | null = null;
+const persistPending = () => {
+  const out: Record<string, { hash: string; nonce: string; at: number }> = {};
+  for (const [k, v] of privatePending) out[k] = { hash: v.hash, nonce: v.nonce.toString(), at: v.at };
+  try {
+    savePending?.(JSON.stringify(out));
+  } catch {
+    /* best effort */
+  }
+};
+/** Restore the private swaps still waiting (from the session copy) and keep that copy up to date from now on. */
+export function keepPrivatePending(saved: string | undefined | null, save: (json: string) => void): void {
+  try {
+    const j = saved ? JSON.parse(saved) : {};
+    for (const [k, v] of Object.entries<any>(j))
+      if (/^0x[0-9a-f]{40}$/.test(k) && /^0x[0-9a-f]{64}$/.test(String(v?.hash)) && /^\d+$/.test(String(v?.nonce)) && Number.isFinite(v?.at) && Date.now() - v.at < 15 * 60_000 && !privatePending.has(k))
+        privatePending.set(k, { hash: v.hash, nonce: BigInt(v.nonce), at: v.at });
+  } catch {
+    /* a damaged copy is ignored */
+  }
+  savePending = save;
+  persistPending();
+}
+
+/** The nonce written in a signed EIP-1559 transaction (0x02 ‖ rlp([chainId, nonce, …])). */
+export function nonceOfRaw(raw: string): bigint | null {
+  try {
+    const b = hexToBytes(raw.replace(/^0x/, ""));
+    if (b[0] !== 2) return null;
+    let i = 1;
+    const head = b[i]!;
+    i += head >= 0xf8 ? 1 + (head - 0xf7) : 1; // list header
+    const item = (): Uint8Array => {
+      const h = b[i]!;
+      if (h < 0x80) return b.slice(i, ++i);
+      if (h <= 0xb7) {
+        const v = b.slice(i + 1, i + 1 + (h - 0x80));
+        i += 1 + (h - 0x80);
+        return v;
+      }
+      const n = h - 0xb7;
+      let len = 0;
+      for (let k = 0; k < n; k++) len = len * 256 + b[i + 1 + k]!;
+      const v = b.slice(i + 1 + n, i + 1 + n + len);
+      i += 1 + n + len;
+      return v;
+    };
+    item(); // chain id
+    const n = item();
+    return n.length ? BigInt("0x" + bytesToHex(n)) : 0n;
+  } catch {
+    return null;
+  }
+}
+
 /* ------------------------------------------------------------- account */
 
 export interface EthAccount {
@@ -213,7 +293,13 @@ export class EthRpc {
    * `max` 0 means no upper limit.
    */
   async bridgeBounds(controller: string): Promise<{ min: bigint; max: bigint }> {
-    const [min, max] = await Promise.all([this.read(controller, selector("minDepositAmount()")), this.read(controller, selector("maxDepositAmount()"))]);
+    // An empty answer is not a zero: it would silently turn the checks off.
+    const read = async (sig: string) => {
+      const r = await this.raw(controller, selector(sig));
+      if (!/^0x[0-9a-fA-F]{64}/.test(r)) throw new Error("Could not read the bridge's limits. Nothing was sent; try again in a moment.");
+      return BigInt(r.slice(0, 66));
+    };
+    const [min, max] = await Promise.all([read("minDepositAmount()"), read("maxDepositAmount()")]);
     return { min, max };
   }
 
@@ -223,19 +309,36 @@ export class EthRpc {
    * reports a zero base fee, so its gas price is used instead.
    */
   async prepare(from: string, to: string, data: Uint8Array, value = 0n, limits: { maxGas?: bigint; zeroBaseFee?: boolean; minGas?: bigint; maxGasPrice?: bigint; minTip?: bigint; maxTip?: bigint } = {}): Promise<EthTx> {
-    const [nonce, gas, tip, block] = await Promise.all([
+    const [publicNonce, gas, tip, block] = await Promise.all([
       this.call("eth_getTransactionCount", [from, "pending"]),
       this.call("eth_estimateGas", [{ from, to, data: "0x" + bytesToHex(data), ...(value > 0n ? { value: hex(value) } : {}) }]),
       this.call("eth_maxPriorityFeePerGas", []).catch(() => "0x3b9aca00"),
       this.call("eth_getBlockByNumber", ["latest", false]),
     ]);
+    // A private swap still waiting has taken a number the public servers cannot see yet.
+    let nonce = BigInt(publicNonce);
+    const pending = this.urls === RPCS ? privatePending.get(from.toLowerCase()) : undefined;
+    if (pending && Date.now() - pending.at < 15 * 60_000 && pending.nonce >= nonce) {
+      // Flashbots may have given up on it (after about 25 blocks): then its number is free again, or the next
+      // transaction would wait behind a gap. Any other answer, or no answer, keeps the number taken.
+      const status = await this.fetcher(PRIVATE_STATUS + pending.hash, { method: "GET" })
+        .then((r) => r.json())
+        .then((j: any) => String(j?.status ?? ""))
+        .catch(() => "");
+      if (status === "FAILED" || status === "CANCELLED") {
+        privatePending.delete(from.toLowerCase());
+        persistPending();
+      } else nonce = pending.nonce + 1n;
+    }
     // These numbers come from a public server. They are bounded here so that
     // a wrong or hostile answer cannot burn the user's ETH as fees.
     const base = BigInt(block?.baseFeePerGas ?? "0x0");
     const estimate = BigInt(gas);
     const maxGas = limits.maxGas ?? MAX_GAS;
     if (estimate > maxGas) throw new Error("This transaction would use an abnormal amount of gas. Nothing was sent.");
+    // 20% of margin over the estimate, but never past the ceiling itself: the most a transaction can cost stays bounded.
     let gasLimit = (estimate * 12n) / 10n;
+    if (gasLimit > maxGas) gasLimit = maxGas;
     // A gas limit suggested by a server is honoured only within the wallet's own ceiling.
     if (limits.minGas && gasLimit < limits.minGas) gasLimit = limits.minGas > maxGas ? maxGas : limits.minGas;
     const tooExpensive = "This network's fees are far above normal right now. Nothing was sent; try again later.";
@@ -245,7 +348,7 @@ export class EthRpc {
       const price = await this.gasPriceMin();
       if (price <= 0n) throw new Error("Could not read this network's current fee. Try again in a moment.");
       if (price > (limits.maxGasPrice ?? MAX_BASE_FEE)) throw new Error(tooExpensive);
-      return { nonce: BigInt(nonce), gasLimit, maxPriorityFeePerGas: price, maxFeePerGas: (price * 12n) / 10n, to, value, data };
+      return { nonce, gasLimit, maxPriorityFeePerGas: price, maxFeePerGas: (price * 12n) / 10n, to, value, data };
     }
     if (base <= 0n) throw new Error("Could not read Ethereum's current fee. Try again in a moment.");
     if (base > (limits.maxGasPrice ?? MAX_BASE_FEE)) throw new Error(limits.maxGasPrice ? tooExpensive : "Ethereum fees are extremely high right now. Nothing was sent; try again later.");
@@ -253,9 +356,10 @@ export class EthRpc {
     const maxTip = limits.maxTip ?? MAX_TIP;
     if (priority > maxTip) priority = maxTip;
     if (limits.minTip && priority < limits.minTip) priority = limits.minTip;
+    if (this.urls === RPCS && priority < MIN_TIP) priority = MIN_TIP;
     const maxFee = base * 2n + priority;
     if (limits.maxGasPrice && maxFee > limits.maxGasPrice * 2n) throw new Error(tooExpensive);
-    return { nonce: BigInt(nonce), gasLimit, maxPriorityFeePerGas: priority, maxFeePerGas: maxFee, to, value, data };
+    return { nonce, gasLimit, maxPriorityFeePerGas: priority, maxFeePerGas: maxFee, to, value, data };
   }
 
   /**
@@ -264,7 +368,45 @@ export class EthRpc {
    * attempt did reach the network, and the caller must wait for it rather
    * than sign a second one.
    */
-  async send(raw: string, hash?: string): Promise<string> {
+  /** Ethereum mainnet with the private route on: swaps go through Flashbots Protect. */
+  private get viaPrivate(): boolean {
+    return privateSend && this.urls === RPCS;
+  }
+
+  /**
+   * `swap`: a trade, sent through Flashbots when the private route is on (`from`: its sender, so the
+   * next transaction gets the next number). A trade never falls back to the public waiting room,
+   * where bots could trade around it: if Flashbots does not answer, nothing is sent.
+   */
+  async send(raw: string, hash?: string, swap = false, from?: string): Promise<string> {
+    if (swap && this.viaPrivate) {
+      const remember = (h: string) => {
+        const nonce = nonceOfRaw(raw);
+        if (from && nonce !== null) {
+          privatePending.set(from.toLowerCase(), { hash: h.toLowerCase(), nonce, at: Date.now() });
+          persistPending();
+        }
+        return h;
+      };
+      try {
+        const res = await this.fetcher(PRIVATE_RPC, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_sendRawTransaction", params: [raw] }) });
+        const j: any = await res.json();
+        if (j?.error) {
+          const msg = remoteText("Ethereum", j.error.message);
+          if (hash && /already known|known transaction|already imported/i.test(msg)) return remember(hash);
+          // A refusal about the transaction itself (fee, nonce, balance) would be the same on a public server.
+          if (/insufficient|nonce|underpriced|exceeds|revert|fee/i.test(msg)) throw new Error(msg);
+        } else {
+          const answered = String(j?.result ?? "").toLowerCase();
+          if (/^0x[0-9a-f]{64}$/.test(answered) && (!hash || answered === hash.toLowerCase())) return remember(hash ?? answered);
+        }
+      } catch (e) {
+        if (e instanceof Error && /insufficient|nonce|underpriced|exceeds|revert|fee/i.test(e.message)) throw e;
+      }
+      // The answer may have been lost on the way back: if Flashbots has the trade, it is sent.
+      if (hash && (await this.knows(hash))) return remember(hash);
+      throw new Error("Flashbots, which keeps your swap away from trading bots, did not answer. Nothing was swapped. Try again in a moment, or turn off private swaps in Settings > Privacy.");
+    }
     try {
       const answered = String(await this.call("eth_sendRawTransaction", [raw])).toLowerCase();
       // "Sent" means the network named this transaction back: a null or odd answer is not an acceptance.
@@ -279,6 +421,12 @@ export class EthRpc {
     }
   }
 
+  /** How a mined transaction ended: true if it succeeded, false if it was reverted, null while it is not in a block. */
+  async outcome(hash: string): Promise<boolean | null> {
+    const r = await this.call("eth_getTransactionReceipt", [hash]).catch(() => null);
+    return r ? BigInt(r.status ?? "0x0") === 1n : null;
+  }
+
   /** Whether a transaction is already in a block. */
   async mined(hash: string): Promise<boolean> {
     return !!(await this.call("eth_getTransactionReceipt", [hash]).catch(() => null));
@@ -287,7 +435,15 @@ export class EthRpc {
   /** Whether the network has seen a transaction (waiting or mined). */
   async knows(hash: string): Promise<boolean> {
     try {
-      return !!(await this.call("eth_getTransactionByHash", [hash]));
+      if (await this.call("eth_getTransactionByHash", [hash])) return true;
+    } catch {
+      /* asked below */
+    }
+    // A private transaction is invisible to public servers until it is in a block.
+    if (this.urls !== RPCS) return false;
+    try {
+      const j: any = await (await this.fetcher(PRIVATE_STATUS + hash, { method: "GET" })).json();
+      return j?.status === "PENDING" || j?.status === "INCLUDED";
     } catch {
       return false;
     }
@@ -295,10 +451,30 @@ export class EthRpc {
 
   /** Wait until a transaction is mined. Resolves true on success, false if it failed. */
   async wait(hash: string, timeoutMs = 240_000, everyMs = 4000): Promise<boolean> {
-    const end = Date.now() + timeoutMs;
-    while (Date.now() < end) {
+    const h = hash.toLowerCase();
+    const mine = [...privatePending.entries()].find(([, p]) => p.hash === h);
+    const done = () => {
+      if (mine && privatePending.get(mine[0])?.hash === h) {
+        privatePending.delete(mine[0]);
+        persistPending();
+      }
+    };
+    // Flashbots keeps trying a private swap for about 25 blocks (5 minutes): wait for its answer.
+    const end = Date.now() + (mine ? Math.max(timeoutMs, 7 * 60_000) : timeoutMs);
+    for (let round = 1; Date.now() < end; round++) {
       const r = await this.call("eth_getTransactionReceipt", [hash]).catch(() => null);
-      if (r) return BigInt(r.status ?? "0x0") === 1n;
+      if (r) {
+        done();
+        return BigInt(r.status ?? "0x0") === 1n;
+      }
+      // A private swap that Flashbots gave up on will never be mined: say so instead of waiting.
+      if (mine && round % 3 === 0) {
+        const j: any = await this.fetcher(PRIVATE_STATUS + hash, { method: "GET" }).then((res) => res.json()).catch(() => null);
+        if (j?.status === "FAILED" || j?.status === "CANCELLED") {
+          done();
+          throw new Error("Flashbots did not include this swap, usually because the price moved or it would have failed. Nothing was swapped and it cost nothing. You can try again.");
+        }
+      }
       await new Promise((ok) => setTimeout(ok, everyMs));
     }
     throw new Error("Ethereum has not confirmed the transaction yet. Do not send it again: it can still go through. Check your Ethereum address in a few minutes.");

@@ -1,0 +1,12 @@
+/* Firefox only: data consent screen. */
+.consent { box-sizing: border-box; height: 100%; overflow-y: auto; padding: 22px 20px; display: flex; flex-direction: column; gap: 10px; }
+.consent h1 { margin: 0; font-size: 22px; }
+.consent h2 { margin: 6px 0 4px; font: 600 14px/1.35 var(--ui); }
+.consent p, .consent ul { margin: 0; }
+.consent ul { padding-left: 18px; display: flex; flex-direction: column; gap: 6px; list-style: disc; }
+.consent-lede { font-size: 15px; }
+.consent-actions { position: sticky; bottom: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 8px -20px -22px; padding: 12px 20px 18px; background: var(--paper); border-top: 1px solid var(--line); }
+.consent-actions.one { grid-template-columns: 1fr; }
+body.consent-tab { width: auto; height: auto; min-height: 100vh; overflow: auto; }
+body.consent-tab .consent { max-width: 560px; margin: 0 auto; padding: 48px 20px; height: auto; font-size: 15px; }
+body.consent-tab .consent-actions { position: static; margin: 12px 0 0; padding: 0; border: 0; }

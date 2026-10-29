@@ -29,12 +29,14 @@ describe("speed up a waiting payment", () => {
     vout: Array.from({ length: tx.outputsLength }, (_, n) => ({ n, value: String(tx.getOutput(n).amount), addresses: [addrs[n]!] })),
   });
 
+  const ok = { inputs: p.inputs.map((u) => `${u.txid}:${u.vout}=${u.value}`), change: p.change.toString(), changeAddress: p.changeAddress };
+
   it("new payments allow replace-by-fee", () => {
     expect(tx.getInput(0).sequence).toBe(c.RBF_SEQUENCE);
   });
 
   it("pays a higher fee from the change; the recipient and the commission get exactly the same", () => {
-    const fast = c.speedUpPlan(indexed(), snap, 20);
+    const fast = c.speedUpPlan(indexed(), snap, 20, ok);
     expect(fast.amount).toBe(p.amount);
     expect(fast.to).toBe(dest);
     expect(fast.serviceFee).toBe(p.serviceFee);
@@ -47,21 +49,21 @@ describe("speed up a waiting payment", () => {
   });
 
   it("always pays at least the old fee plus the relay fee, even if asked for less", () => {
-    const fast = c.speedUpPlan(indexed(), snap, 1);
+    const fast = c.speedUpPlan(indexed(), snap, 1, ok);
     expect(fast.fee).toBe(p.fee + BigInt(p.vsize));
   });
 
   it("refuses payments sent without replace-by-fee, confirmed ones, and foreign ones", () => {
-    expect(() => c.speedUpPlan(indexed(0xffffffff), snap, 20)).toThrow(/without the speed-up option/);
-    expect(() => c.speedUpPlan({ ...indexed(), confirmations: 1 }, snap, 20)).toThrow(/already confirmed/);
+    expect(() => c.speedUpPlan(indexed(0xffffffff), snap, 20, ok)).toThrow(/without the speed-up option/);
+    expect(() => c.speedUpPlan({ ...indexed(), confirmations: 1 }, snap, 20, ok)).toThrow(/already confirmed/);
     const foreign = indexed();
     foreign.vin[0]!.addresses = [dest];
-    expect(() => c.speedUpPlan(foreign, snap, 20)).toThrow(/not made by this wallet/);
+    expect(() => c.speedUpPlan(foreign, snap, 20, ok)).toThrow(/not made by this wallet/);
   });
 
   it("measures the payment's size itself: a server announcing a huge size cannot inflate the fee", () => {
-    const honest = c.speedUpPlan(indexed(), snap, 20);
-    const lied = c.speedUpPlan({ ...indexed(), vsize: 1_000_000 }, snap, 20);
+    const honest = c.speedUpPlan(indexed(), snap, 20, ok);
+    const lied = c.speedUpPlan({ ...indexed(), vsize: 1_000_000 }, snap, 20, ok);
     expect(lied.fee).toBe(honest.fee);
     expect(lied.change).toBe(honest.change);
     expect(lied.vsize).toBe(p.vsize);
@@ -70,7 +72,7 @@ describe("speed up a waiting payment", () => {
   it("refuses when a later payment already spends it", () => {
     const t = indexed();
     (t.vout[2] as { spent?: boolean }).spent = true;
-    expect(() => c.speedUpPlan(t, snap, 20)).toThrow(/later payment/);
+    expect(() => c.speedUpPlan(t, snap, 20, ok)).toThrow(/later payment/);
   });
 
   it("refuses when the change cannot pay for it", () => {
@@ -82,7 +84,7 @@ describe("speed up a waiting payment", () => {
       vout: Array.from({ length: t.outputsLength }, (_, n) => ({ n, value: String(t.getOutput(n).amount), addresses: [[dest, chg.address][n]!] })),
     };
     expect(tight.change).toBeGreaterThan(0n);
-    expect(() => c.speedUpPlan(info, snap, 9_000)).toThrow(/too small/);
+    expect(() => c.speedUpPlan(info, snap, 9_000, { inputs: tight.inputs.map((u) => `${u.txid}:${u.vout}=${u.value}`), change: tight.change.toString(), changeAddress: tight.changeAddress })).toThrow(/too small/);
   });
   it("rebuilds only from the coins this device approved: an indexer naming another coin of the wallet cannot make a second payment", () => {
     const approved = { inputs: p.inputs.map((u) => `${u.txid}:${u.vout}=${u.value}`), change: p.change.toString(), changeAddress: p.changeAddress };
@@ -94,6 +96,10 @@ describe("speed up a waiting payment", () => {
     const under = indexed();
     under.vout = under.vout.map((o) => (o.addresses[0] === chg.address ? { ...o, value: String(BigInt(o.value) - 1_00000000n) } : o));
     expect(() => c.speedUpPlan(under, snap, 20, approved)).toThrow(/does not match/);
+  });
+  it("refuses a payment without the record of what was approved (sent by an older Keshi): the server's copy alone is never enough", () => {
+    expect(() => c.speedUpPlan(indexed(), snap, 20, undefined)).toThrow(/older version/);
+    expect(() => c.speedUpPlan(indexed(), snap, 20, { inputs: [], change: "1", changeAddress: chg.address })).toThrow(/older version/);
   });
 });
 

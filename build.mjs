@@ -28,7 +28,7 @@ const targets = {
   firefox: {
     ...base,
     background: { scripts: ["background.js"] },
-    browser_specific_settings: { gecko: { id: "keshi-wallet@keshiwallet.io", strict_min_version: "140.0", data_collection_permissions: { required: ["financialAndPaymentInfo"], optional: ["authenticationInfo"] } }, gecko_android: { strict_min_version: "142.0" } },
+    browser_specific_settings: { gecko: { id: "keshi-wallet@keshiwallet.io", strict_min_version: "140.0", data_collection_permissions: { required: ["financialAndPaymentInfo"] } }, gecko_android: { strict_min_version: "142.0" } },
   },
 };
 
@@ -37,7 +37,11 @@ for (const [name, manifest] of Object.entries(targets)) {
   const out = `dist/${name}`;
   mkdirSync(out, { recursive: true });
   await build({
-    entryPoints: { popup: "src/ui/main.tsx", background: "src/ext/background.ts", bridge: "src/ext/bridge.ts", inpage: "src/ext/inpage.ts" },
+    // Firefox adds a data consent screen in front of the same wallet (Mozilla policy); Chrome's files are unchanged.
+    entryPoints:
+      name === "firefox"
+        ? { popup: "src/ui/main.firefox.tsx", background: "src/ext/background.firefox.ts", bridge: "src/ext/bridge.ts", inpage: "src/ext/inpage.ts" }
+        : { popup: "src/ui/main.tsx", background: "src/ext/background.ts", bridge: "src/ext/bridge.ts", inpage: "src/ext/inpage.ts" },
     bundle: true,
     format: "iife",
     target: ["chrome111", "firefox128"],

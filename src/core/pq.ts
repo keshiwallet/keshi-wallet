@@ -14,10 +14,14 @@ import { xmssKeygen, xmssSign, XMSS_PK_LEN, XMSS_SIG_LEN } from "./xmss";
 // such a computer cannot break: the same address offers a second, post-quantum
 // way to spend, through Pearl's OP_CHECKXMSSSIG.
 //
-// Built the way the official Pearl wallet builds them (`getnewaddress` with
-// the pq option): the XMSS seeds come from m/222'/coin'/account'/branch/index,
+// Built the way the Pearl wallet built them up to pearld 1.5.3 (`getnewaddress`
+// with the pq option): the XMSS seeds come from m/222'/coin'/account'/branch/index,
 // expanded with HKDF, and the address is a taproot output whose script tree is
-// the single leaf `<xmss public key> OP_CHECKXMSSSIG`.
+// the single leaf `<xmss public key> OP_CHECKXMSSSIG`. pearld 1.5.5 removed that
+// option from its wallet ahead of a P2MR post-quantum wallet with its own key
+// derivation (the network still accepts OP_CHECKXMSSSIG). Since Keshi 1.0.4 these
+// addresses are no longer created; one made earlier is still found, counted in the
+// balance and spent through its ordinary key.
 
 const OP_CHECKXMSSSIG = 0xde;
 const LEAF_VERSION = 0xc0;

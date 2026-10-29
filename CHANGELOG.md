@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.0.4 - 26 October 2026
+
+Mining: the network at a glance, your miner followed at its pool, and earnings over any period. Safer Buy with USDT, and private swaps on Ethereum. Includes every fix of 1.0.3. Same keys, same addresses, same fees.
+
+Mining
+- Pearl network: hashrate, difficulty with its 7-day change, measured block time and the current block reward, read from the wallet's own indexer. The reward follows the node's emission (a slow decay, no halving).
+- My miner: follow your payout address at Kryptex or HeroMiners. Hashrate, every worker with its state, unpaid balance at the pool. Only the payout address is sent, which the pool already knows; no account.
+- Offline alert: a Chrome notification when a worker stops sending work for 5, 10 or 30 minutes, checked even with Keshi closed or locked, once per outage.
+- Earnings by period: 7 days, 30 days, 90 days, 12 months or all time, with a bar per day, week or month; the total since the first payout; and, beyond 7 days, the value at today's price and at the price of each payout.
+- Real yield: what you received over the last 7 days against what your hashrate should earn on today's network.
+- Pearl mining pools: the main pools with their fee and payout scheme, and a link to each; Peryn (mine PEARL while serving AI requests) is listed as coming.
+- Profit calculator: card (Blackwell, Hopper, RTX 50/40/30, reference figures; "estimate" when no public benchmark exists) or your own hashrate and power, every card side by side, electricity price and pool fee; PRL and dollars per day, net after electricity, and the next 30 days with the difficulty growing at its recent pace.
+- Offline alerts keep working while Keshi is locked, as long as Chrome runs: the pool and the payout address are kept unencrypted for that, nothing else. The pool is asked every 2 minutes, the chosen delay (5, 10 or 30 min) is the one used, and a worker that disappears from the pool's list is announced too.
+- Earnings count mining income only: block rewards and payments to the payout address, not the PRL coming back from the bridge. Real yield is shown only for the payout address of this wallet.
+- A new miner can be followed before its first share. Pool requests give up after 15 seconds. The difficulty trend covers exactly 7 days, and the 30-day projection includes the shrinking block reward. "1,200 TH/s" is read as twelve hundred. The unpaid balance follows Hide amounts. On testnet, following a miner is not offered.
+
+Buy with USDT, in two steps
+- Your USDT now travels to your own Ethereum address first, then one tap swaps it for wPRL on Uniswap from that address. Keshi reads, inside every transaction it signs, who receives the money: a one-step route hid that in an instruction run on Ethereum after the bridge, which the wallet could not read. Such routes are now refused.
+- The ETH for fees is bought with the USDT when your Ethereum address has none, since the swap needs a little.
+- At the moment you tap, the swap's price is checked against Uniswap's quote and against Keshi's own PRL price. Keshi's 0.5% stays the only Keshi fee on the purchase; the swap step adds none.
+- Keshi signs only LI.FI bridge functions it knows (their first argument is the transfer's description, read at the place the format puts it), never another function shaped to look like one.
+- The swap uses only the USDT of this purchase: what LI.FI reports arrived, when it reports USDT on Ethereum, and never more than 3% above the quote. A swap already sent is not sent again while the network still has it.
+- Purchases waiting to be swapped are followed for a week, so the "Swap to wPRL" button appears even if you come back the next day.
+
+Ethereum
+- Private swaps: swaps go through Flashbots Protect, so bots cannot see a swap coming and trade around it, and a swap that would fail is not included and costs nothing. On by default (Settings > Privacy). If Flashbots does not answer, the swap is not sent. Plain sends, permissions and bridge returns go out the usual way.
+
+Bridge
+- A bridge deposit pays exactly the amount the bridge checked: the amount can no longer be changed (or set to Max) on the payment screen.
+- The bridge's limits must be read before a deposit; an empty answer is no longer taken as "no limit".
+
+Hardening (October 2026)
+- Speed up: a payment sent by an older Keshi, without the record of the coins it spent, is no longer sped up; the network's copy alone is never enough to rebuild a payment.
+- Buy with USDT: a quote is signed only if the chain, the amount and the address on screen are still the ones it was asked for; an answer that arrives after the form changed is dropped. LI.FI's permission address must be present and be LI.FI's contract, the quote must name this wallet as the sender, and a negative or unreadable fee is refused.
+- Buy with USDT: the purchase is written in the list before it is sent, so it is followed even if the network's answer is lost. A purchase LI.FI reports as finished in a way Keshi does not recognise is shown as "check what arrived", never as "arrived".
+- Ethereum: the gas limit never goes above the wallet's ceiling, margin included.
+- Release: the store package is built only after the type check and every test pass.
+
+Last checks before release
+- The password strength meter and the wallet list look exactly as in 1.0.3 again: two Mining styles had taken their names.
+- Buy with USDT: if reading Ethereum failed when the screen opened, "Get a quote" reads it again instead of waiting forever.
+- My miner: a malformed entry in the pool's workers list is skipped instead of breaking the whole list (and the alert). A worker with no time of last work is announced only after the chosen delay.
+- Private swaps: a swap still waiting is remembered when Keshi is closed and reopened, so the next Ethereum transaction gets the right number; a swap Flashbots gave up on frees its number.
+- Removing a wallet stops following a miner at one of its addresses.
+- Buy with USDT: if the connection drops while the purchase is sent, it stays in the list and is followed, the quote is cleared so it cannot be signed twice, and the message says to wait before buying again.
+
+
+Quantum-ready addresses
+- Keshi no longer creates them. Pearl removed this address design from its own wallet in pearld 1.5.5, ahead of a different post-quantum address type (P2MR) with its own keys. An address made with an earlier Keshi keeps working: its PRL stay in the balance and are sent as usual, and Settings > Advanced finds it again after restoring the phrase on another device.
+
 ## 1.0.3 - 22 October 2026
 
 Buy PRL with USDT from another chain, your PRL at a glance, and a clearer review before you confirm. Nothing from 1.0.2 changes: same keys, same addresses, same fees.

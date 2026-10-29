@@ -15,7 +15,7 @@ Keshi is a self-custody wallet for Pearl, free on Chrome. No account, no sign-up
 - Keshi is independent. It is not made by Pearl Research Labs, and it is not related to keshi.io, an unrelated project with a similar name.
 - Nobody, not even us, can recover your recovery phrase. Nobody from Keshi will ever ask you for it.
 
-This repository holds the code of the Keshi browser extension, so you can read it and check it. Version in this repository: **1.0.3**, the version in the Chrome Web Store.
+This repository holds the code of the Keshi browser extension, so you can read it and check it. Version in this repository: **1.0.4**, now live on the Chrome Web Store.
 
 ## What it does
 
@@ -38,12 +38,13 @@ Send, receive, buy, swap, bridge, mint, and track your mining. One wallet, your 
 | | Keshi fee |
 |---|---|
 | Send and receive PRL | free |
+| Buy Pearl with USDT | 0.5% |
 | Swap wPRL / ETH | 0.3% |
 | Bridge PRL to Ethereum | 0.1% (max 3 PRL), free on the way back |
 | Combine small payouts | 0.1% (max 2 PRL) |
 | Mint a PRL-20 token | 0.05 PRL |
 
-Network fees and PearlBridge's own fee are separate. Every fee is shown in the app before you confirm.
+Network fees and partners' own fees (PearlBridge, the USDT route) are separate. Every fee is shown in the app before you confirm.
 The addresses that receive Keshi's fees are in [`fees.config.json`](fees.config.json), and in the built extension.
 
 ## Is this the code in the Chrome Web Store?
@@ -60,10 +61,10 @@ npm run build
 node verify.mjs
 ```
 
-You should see `All 17 files match Keshi 1.0.3.` The list of expected files and their SHA-256 hashes is in [`verify/chrome-1.0.3.sha256`](verify/chrome-1.0.3.sha256). It was made from the package uploaded to the Chrome Web Store, so a match means this code produces the same files as the Store package.
+You should see `All 17 files match Keshi 1.0.4.` The list of expected files and their SHA-256 hashes is in [`verify/chrome-1.0.4.sha256`](verify/chrome-1.0.4.sha256). It was made from the package uploaded to the Chrome Web Store, so a match means this code produces the same files as the Store package.
 
-The package that was uploaded, `keshi-chrome-1.0.3.zip`, is attached to the release of this repository. Its SHA-256 is
-`f2df45c95d4975e210ea7d4aa801dd20e67aa6e954afa98f722d25a715a03604`.
+The package that was uploaded, `keshi-chrome-1.0.4.zip`, is attached to the release of this repository. Its SHA-256 is
+`da720a4ee6c57722416767b3d35c14b55bafb815e97bb5c8216a8092d9157700`.
 A zip also records file dates and order, so a zip you build yourself can have another SHA-256 even when every file inside is identical. What matters is the files inside, and `verify.mjs` compares those, one by one, against the Store package.
 
 Every push to this repository is also rebuilt and checked by GitHub itself: see the **Rebuild and verify** action in the Actions tab ([`.github/workflows/verify.yml`](.github/workflows/verify.yml)).
@@ -76,9 +77,9 @@ node verify.mjs "<folder>"
 
 The extension ID is `mmjkdbdkgikbhbgcmpaaahhjhmdknpnb`. In Chrome the folder is usually:
 
-- Windows: `%LOCALAPPDATA%\Google\Chrome\User Data\Default\Extensions\mmjkdbdkgikbhbgcmpaaahhjhmdknpnb\1.0.3_0`
-- macOS: `~/Library/Application Support/Google/Chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.3_0`
-- Linux: `~/.config/google-chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.3_0`
+- Windows: `%LOCALAPPDATA%\Google\Chrome\User Data\Default\Extensions\mmjkdbdkgikbhbgcmpaaahhjhmdknpnb\1.0.4_0`
+- macOS: `~/Library/Application Support/Google/Chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.4_0`
+- Linux: `~/.config/google-chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.4_0`
 
 (If you use another Chrome profile or another Chromium browser, the path starts differently.) Chrome adds a `_metadata` folder, which the script ignores, and may add one `update_url` line to `manifest.json`, which the script accepts and says so.
 

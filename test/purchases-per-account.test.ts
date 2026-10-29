@@ -1,6 +1,7 @@
 import "./_localstorage";
 import { beforeEach, describe, expect, it } from "vitest";
 import * as store from "../src/ui/store";
+import * as core from "../src/core";
 import { setDataKey, newDataKey, local } from "../src/ext/platform";
 
 const A = "0x1111111111111111111111111111111111111111";
@@ -34,7 +35,34 @@ describe("history per account", () => {
     expect(store.purchaseOutcome({ status: "DONE" })).toBe("arrived");
     expect(store.purchaseOutcome({ status: "DONE", substatus: "PARTIAL" })).toBe("partial");
     expect(store.purchaseOutcome({ status: "DONE", substatus: "REFUNDED" })).toBe("refunded");
+    expect(store.purchaseOutcome({ status: "DONE", substatus: "COMPLETED" })).toBe("arrived");
+    // A way of finishing Keshi does not know is never announced as "arrived".
+    expect(store.purchaseOutcome({ status: "DONE", substatus: "SOMETHING_NEW" })).toBe("partial");
     expect(store.purchaseOutcome({ status: "FAILED" })).toBe("failed");
     expect(store.purchaseOutcome({ status: "PENDING", substatus: "REFUND_IN_PROGRESS" })).toBeUndefined();
+  });
+});
+
+describe("second step of a USDT purchase", () => {
+  const ABANDON = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+  it("is refused twice, and for another account's purchase", async () => {
+    const mine = { phrase: ABANDON } as unknown as core.Secrets;
+    const me = core.ethAccountOf(mine).address;
+    const p: store.UsdtPurchase = { txHash: "0xd1", chain: "arbitrum", amount: 50_000000n, to: "usdt", expected: 49_000000n, at: Date.now(), from: me, done: true, outcome: "arrived" };
+    await store.recordPurchase({ ...p, swapped: "0x" + "ee".repeat(32) });
+    await expect(store.finishUsdtPurchase(mine, p, () => {})).rejects.toThrow(/already swapped/);
+    await expect(store.finishUsdtPurchase(mine, { ...p, txHash: "0xd2", from: A }, () => {})).rejects.toThrow(/another account|Unknown purchase/);
+  });
+});
+
+describe("how much USDT the second step swaps", () => {
+  const p = (over: Partial<store.UsdtPurchase> = {}): store.UsdtPurchase => ({ txHash: "0xe1", chain: "arbitrum", amount: 50_000000n, to: "usdt", expected: 49_000000n, at: 0, from: A, ...over });
+  it("swaps what arrived, never more than the address holds", () => {
+    expect(store.usdtToSwap(p({ received: 48_900000n }), 1_000_000000n)).toBe(48_900000n);
+    expect(store.usdtToSwap(p({ received: 48_900000n }), 10_000000n)).toBe(10_000000n);
+    expect(store.usdtToSwap(p(), 1_000_000000n)).toBe(49_000000n);
+  });
+  it("ignores a reported amount far above the quote, so the user's other USDT is never swapped", () => {
+    expect(store.usdtToSwap(p({ received: 900_000000n }), 1_000_000000n)).toBe(49_000000n);
   });
 });

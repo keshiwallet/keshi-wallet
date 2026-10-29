@@ -25,3 +25,4 @@ export * from "./ethActivity";
 export * from "./ethsend";
 export * from "./history";
 export * from "./lifi";
+export * from "./pools";

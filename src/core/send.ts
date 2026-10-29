@@ -202,11 +202,15 @@ export function speedUpPlan(
   tx: { txid: string; confirmations: number; fees?: string; vsize?: number; vin: { txid?: string; vout?: number; sequence?: number; addresses?: string[]; value?: string }[]; vout: { n: number; addresses?: string[]; value?: string; spent?: boolean }[] },
   snap: Snapshot,
   newRate: number,
-  approved?: { inputs: string[]; change: string; changeAddress: string },
+  approved: { inputs: string[]; change: string; changeAddress: string } | undefined,
 ): Plan {
   if (tx.confirmations > 0) throw new Error("This payment is already confirmed");
-  // The coins and the change are taken from what this device approved, when known: the indexer's copy only says whether it is still waiting.
-  if (approved) {
+  // The coins and the change must be the ones this device approved: the indexer's copy only says whether it is still waiting.
+  // Without that record (a payment sent by an older Keshi), a server could describe other coins of the wallet, and the
+  // "faster version" would be a second payment instead of a replacement. Such payments are not sped up.
+  if (!approved || !approved.inputs?.length || approved.change === undefined || !approved.changeAddress)
+    throw new Error("This payment was sent by an older version of Keshi, which did not keep what is needed to speed it up safely. It will confirm when the network is less busy.");
+  {
     const got = tx.vin.map((i) => `${i.txid}:${i.vout}=${BigInt(i.value ?? "0")}`).sort().join("|");
     if (got !== [...approved.inputs].sort().join("|")) throw new Error("The network's copy of this payment spends other coins than the ones you approved. Nothing was changed.");
     const ch = tx.vout.find((o) => o.addresses?.length === 1 && o.addresses[0] === approved.changeAddress);

@@ -6,12 +6,12 @@ const ABANDON = "abandon abandon abandon abandon abandon abandon abandon abandon
 const ARB = c.sourceChain("arbitrum");
 const FROM = c.ethAccountFromPhrase(ABANDON).address;
 
-/** Calldata shaped like LI.FI's startBridgeTokensViaX(BridgeData, X): selector, offset to the struct, then the struct. */
-const bridgeCalldata = (receiver: string, destChain = 1n, minAmount = 100_000_000n) => {
+/** Calldata shaped like LI.FI's startBridgeTokensViaStargate(BridgeData, StargateData): selector, offsets, then the struct. */
+const bridgeCalldata = (receiver: string, destChain = 1n, minAmount = 100_000_000n, destinationCall = 0n) => {
   const w = (v: bigint | string) => (typeof v === "string" ? v.replace(/^0x/, "").toLowerCase().padStart(64, "0") : v.toString(16).padStart(64, "0"));
   const head = w(0x40n) + w(0x200n); // offsets: BridgeData at 0x40, second arg later
-  const struct = [w("0x" + "11".repeat(32)), w(0x140n), w(0x180n), w(0n), w(ARB.usdt.address), w(receiver), w(minAmount), w(destChain), w(0n), w(0n)].join("");
-  return "0x" + "aabbccdd" + head + struct + w(5n) + w("0x" + "72656c6179" + "0".repeat(54)) + w(5n) + w("0x" + "6b65736869" + "0".repeat(54));
+  const struct = [w("0x" + "11".repeat(32)), w(0x140n), w(0x180n), w(0n), w(ARB.usdt.address), w(receiver), w(minAmount), w(destChain), w(0n), w(destinationCall)].join("");
+  return "0x" + "14d53077" + head + struct + w(5n) + w("0x" + "72656c6179" + "0".repeat(54)) + w(5n) + w("0x" + "6b65736869" + "0".repeat(54));
 };
 
 const quote = (over: any = {}) => ({
@@ -30,8 +30,16 @@ const quote = (over: any = {}) => ({
 });
 
 describe("LI.FI quotes", () => {
+  it("refuses a quote with no permission address, a negative fee, or another sender (audit, October 2026)", () => {
+    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };
+    const { approvalAddress: _gone, ...noApproval } = quote().estimate;
+    expect(() => c.parseQuote(quote({ estimate: noApproval }), want)).toThrow(/permission/);
+    expect(() => c.parseQuote(quote({ estimate: { ...quote().estimate, feeCosts: [{ name: "LIFI Fee", amountUSD: "-5", included: true }] } }), want)).toThrow(/unreadable fee/);
+    expect(() => c.parseQuote(quote({ estimate: { ...quote().estimate, gasCosts: [{ amountUSD: "NaN" }] } }), want)).toThrow(/unreadable fee/);
+    expect(() => c.parseQuote(quote({ action: { ...quote().action, fromAddress: "0x" + "99".repeat(20) } }), want)).toThrow(/different sender/);
+  });
   it("reads the figures the screen shows", () => {
-    const q = c.parseQuote(quote(), { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM });
+    const q = c.parseQuote(quote(), { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n });
     expect(q.toAmount).toBe(4547686600n);
     expect(q.toAmountMin).toBe(4502209700n);
     expect(q.includedFeesUsd).toBeCloseTo(0.55);
@@ -42,7 +50,7 @@ describe("LI.FI quotes", () => {
     expect(q.duration).toBe(3);
   });
   it("refuses a quote for another recipient, chain or token", () => {
-    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM };
+    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };
     const other = "0x8Efc8EBff262e006B71fE4993886B4139E04c861";
     expect(() => c.parseQuote(quote({ action: { ...quote().action, toAddress: other } }), want)).toThrow(/recipient/);
     expect(() => c.parseQuote(quote({ action: { ...quote().action, toChainId: 10 } }), want)).toThrow(/chain/);
@@ -73,14 +81,14 @@ describe("LI.FI quotes", () => {
     expect(c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data: viaEth } }), want).fromAmount).toBe(100_000_000n);
   });
   it("refuses a route that loses too much, a missing dollar value, or a transaction asking for the chain's coin", () => {
-    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM };
+    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };
     expect(() => c.parseQuote(quote({ estimate: { ...quote().estimate, toAmountUSD: "70" } }), want)).toThrow(/20%/);
     expect(() => c.parseQuote(quote({ estimate: { ...quote().estimate, fromAmountUSD: "0" } }), want)).toThrow(/dollar value/);
     expect(() => c.parseQuote(quote({ estimate: { ...quote().estimate, toAmountMin: "4000000000" } }), want)).toThrow(/floor/);
     expect(() => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, value: "0x1" } }), want)).toThrow(/coin/);
   });
   it("only ever calls LI.FI's own contract, and only lets that contract take the USDT", () => {
-    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM };
+    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };
     // A compromised server pointing the transaction at the USDT contract (transfer everything) or anywhere else is refused.
     expect(() => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, to: ARB.usdt.address } }), want)).toThrow(/LI.FI's contract/);
     expect(() => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, to: "0x8Efc8EBff262e006B71fE4993886B4139E04c861" } }), want)).toThrow(/LI.FI's contract/);
@@ -89,7 +97,7 @@ describe("LI.FI quotes", () => {
     expect(c.parseQuote(quote(), want).tx.to.toLowerCase()).toBe(c.LIFI_DIAMOND.toLowerCase());
   });
   it("reads the recipient inside the transaction and refuses any other", () => {
-    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM };
+    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };
     const other = "0x8Efc8EBff262e006B71fE4993886B4139E04c861";
     // The quote's summary says "you", the calldata says the attacker: refused.
     expect(() => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data: bridgeCalldata(other) } }), want)).toThrow(/another address/);
@@ -99,13 +107,29 @@ describe("LI.FI quotes", () => {
     expect(d.receiver.toLowerCase()).toBe(FROM.toLowerCase());
     expect(d.destinationChainId).toBe(1n);
     expect(d.minAmount).toBe(100_000_000n);
+    expect(d.hasDestinationCall).toBe(false);
+  });
+  it("refuses calls whose first argument is not really LI.FI's BridgeData", () => {
+    const good = bridgeCalldata(FROM);
+    // swapTokensSingleV3ERC20ToERC20(bytes32 transactionId, …): its first word is free, so it could point at a fake struct.
+    expect(() => c.decodeBridgeData("0x4666fc80" + good.slice(10))).toThrow(/does not know/);
+    // A known bridge function, but the struct is not where the ABI puts it.
+    const moved = "0x14d53077" + (0x60).toString(16).padStart(64, "0") + good.slice(10 + 64);
+    expect(() => c.decodeBridgeData(moved)).toThrow(/could not be read/);
+    expect(Object.keys(c.LIFI_BRIDGE_CALLS).length).toBeGreaterThan(60);
+  });
+  it("refuses a route that ends with a step on Ethereum it cannot read", () => {
+    // The receiver field says "you", but an instruction run after the bridge would decide who really gets the money.
+    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };
+    expect(c.decodeBridgeData(bridgeCalldata(FROM, 1n, 100_000_000n, 1n)).hasDestinationCall).toBe(true);
+    expect(() => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data: bridgeCalldata(FROM, 1n, 100_000_000n, 1n) } }), want)).toThrow(/cannot check/);
   });
   it("keeps only a genuine LI.FI explorer link", () => {
     expect(c.parseStatus({ status: "DONE", lifiExplorerLink: "https://keshi-support.example/refund" }).explorer).toBeUndefined();
     expect(c.parseStatus({ status: "DONE", lifiExplorerLink: "https://scan.li.fi/tx/0x" + "ab".repeat(32) }).explorer).toBe("https://scan.li.fi/tx/0x" + "ab".repeat(32));
   });
   it("reads a status", () => {
-    expect(c.parseStatus({ status: "DONE", substatus: "COMPLETED", receiving: { amount: "4547686600", txHash: "0xaa" }, lifiExplorerLink: "https://scan.li.fi/tx/0x" + "cd".repeat(32) })).toEqual({ status: "DONE", substatus: "COMPLETED", message: undefined, receivedAmount: 4547686600n, receivingTx: "0xaa", explorer: "https://scan.li.fi/tx/0x" + "cd".repeat(32) });
+    expect(c.parseStatus({ status: "DONE", substatus: "COMPLETED", receiving: { amount: "4547686600", txHash: "0xaa" }, lifiExplorerLink: "https://scan.li.fi/tx/0x" + "cd".repeat(32) })).toEqual({ status: "DONE", substatus: "COMPLETED", message: undefined, receivedAmount: 4547686600n, receivedToken: undefined, receivedChain: undefined, receivingTx: "0xaa", explorer: "https://scan.li.fi/tx/0x" + "cd".repeat(32) });
     expect(c.parseStatus({ status: "WEIRD" }).status).toBe("NOT_FOUND");
     expect(c.describeStatus({ status: "PENDING", substatus: "WAIT_SOURCE_CONFIRMATIONS" })).toMatch(/Confirming/);
   });
@@ -115,16 +139,17 @@ describe("LI.FI quotes", () => {
     const lifi = new c.LiFi(async (u: any, init: any) => {
       url = String(u);
       headers = init.headers;
-      return { ok: true, json: async () => quote() } as any;
+      return { ok: true, json: async () => quote({ action: { ...quote().action, toToken: { address: c.ETH_USDT, symbol: "USDT", decimals: 6 } } }) } as any;
     }, "test-key", { bips: 30n, recipient: FROM, label: "0.3%" });
-    await lifi.quote(ARB, FROM, 100_000_000n, "wprl");
+    await lifi.quote(ARB, FROM, 100_000_000n, "usdt");
     const p = new URL(url).searchParams;
     expect(url.startsWith(c.LIFI_API + "/quote?")).toBe(true);
     expect(p.get("fromChain")).toBe("42161");
     expect(p.get("toChain")).toBe("1");
     expect(p.get("fromToken")).toBe(ARB.usdt.address);
-    expect(p.get("toToken")).toBe(c.WPRL_CONTRACT);
+    expect(p.get("toToken")).toBe(c.ETH_USDT);
     expect(p.get("toAddress")).toBe(FROM);
+    expect(p.get("allowDestinationCall")).toBe("false");
     expect(p.get("fee")).toBe("0.003");
     expect(p.get("integrator")).toBe("keshi");
     expect(headers["x-lifi-api-key"]).toBe("test-key");

@@ -20,7 +20,7 @@ const dec = (s: string) =>
   JSON.parse(s, (_k, x) => (x && typeof x === "object" && "$b" in x ? BigInt(x.$b) : x && typeof x === "object" && "$u" in x ? Uint8Array.from(x.$u) : x));
 
 /** Local keys whose values are encrypted at rest. Settings and the vault itself are not in this list. */
-const SEALED = /^(snap:|contacts$|sites$|crossings$|watch$|watched$|lifi$|ethTokens$|inscriptions:|pendingReveal:|pendingTransfer:|ethLastSend$|pin:|pq:|bridgeEth$|walletNames$|newsRead$|sent:)/;
+const SEALED = /^(snap:|contacts$|sites$|crossings$|watch$|watched$|miner$|lifi$|ethTokens$|inscriptions:|pendingReveal:|pendingTransfer:|ethLastSend$|pin:|pq:|bridgeEth$|walletNames$|newsRead$|sent:)/;
 let dataKey: Uint8Array | null = null;
 
 /** Give (or take away) the key that unlocks the encrypted local data. */
@@ -143,8 +143,49 @@ export interface Settings {
   unit: "prl" | "usd";
   /** Whether the home screen and Activity read the wallet's Ethereum address from public servers. On by default since 1.0.3 (Settings > Privacy turns it off); Swap, Bridge, Buy with USDT and Receive ETH turn it back on when used. */
   ethereum: boolean;
+  /** Ethereum transactions go through Flashbots Protect (no sandwich bots). On by default since 1.0.4. */
+  privateSend?: boolean;
   /** The three-step explanation on Buy with USDT has been read and closed. */
   usdtIntroSeen?: boolean;
+}
+
+/** The pool followed from the Mining tab, and the alert when a worker stops. Stored sealed. */
+export interface MinerWatch {
+  pool: "kryptex" | "herominers";
+  address: string;
+  alert: boolean;
+  /** Minutes without work before the alert. */
+  afterMinutes: 5 | 10 | 30;
+  /** Last state seen by the background check, to alert once per outage. Unused since 1.0.4 (see MinerAlert). */
+  offline?: string[];
+}
+
+/**
+ * What the offline alert needs, kept unencrypted (key "minerAlert") so that it keeps working while
+ * Keshi is locked: the pool, the payout address it already knows, and the delay. Nothing else.
+ * Written by the Mining screen only; the background writes only "minerAlertState".
+ */
+export interface MinerAlert {
+  pool: "kryptex" | "herominers";
+  address: string;
+  afterMinutes: 5 | 10 | 30;
+}
+/** The background's own memory: workers already announced as stopped, and every worker name seen. */
+export interface MinerAlertState {
+  address: string;
+  offline: string[];
+  known: string[];
+  /** Workers seen without hashrate and without a time of last work: when that was first seen (seconds). */
+  idleSince?: Record<string, number>;
+}
+
+/** Keep the unencrypted alert copy in step with the miner the user follows. */
+export async function syncMinerAlert(m: MinerWatch | null): Promise<void> {
+  if (m && m.alert) await local.set("minerAlert", { pool: m.pool, address: m.address, afterMinutes: m.afterMinutes } satisfies MinerAlert);
+  else {
+    await local.remove("minerAlert");
+    await local.remove("minerAlertState");
+  }
 }
 export const DEFAULT_SETTINGS: Settings = { network: "mainnet", autoLockMinutes: 15, hideBalance: false, quote: "usdt", theme: "system", wallet: 0, unit: "prl", ethereum: true };
 

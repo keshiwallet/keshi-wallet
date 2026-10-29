@@ -1,5 +1,7 @@
 import { local, session, getSettings, setDataKey, type DappRequest, type Site } from "./platform";
 import { networkById } from "../core/network";
+import { minerState, offlineCheck } from "../core/pools";
+import type { MinerAlert, MinerAlertState } from "./platform";
 import { formatPrl } from "../core/amount";
 
 // Background worker. It signs nothing itself: it routes requests from websites
@@ -134,7 +136,9 @@ chrome.alarms.onAlarm.addListener(async () => {
   // Auto-lock.
   const s = await session.get<{ expires: number }>("unlocked");
   if (s && s.expires < Date.now()) await session.remove("unlocked");
-  if (!(await loadKey())) return; // locked: balances and addresses are unreadable, so no notification
+  // The miner alert works locked too: it needs only the pool and the payout address, kept for it unencrypted.
+  await checkMiner().catch(() => {});
+  if (!(await loadKey())) return; // locked: balances and addresses are unreadable, so no payment notification
 
   // Incoming payment notification.
   const watch = await local.get<{ network: string; addresses: string[]; received: bigint }>("watch");
@@ -162,3 +166,33 @@ chrome.alarms.onAlarm.addListener(async () => {
     /* offline: try again on the next tick */
   }
 });
+
+/**
+ * Every few minutes, ask the followed pool which workers still send work. A
+ * worker silent for longer than the chosen delay is announced once, and again
+ * only after it came back. Only the payout address is sent, to a pool that
+ * already knows it.
+ */
+async function checkMiner(): Promise<void> {
+  const m = await local.get<MinerAlert>("minerAlert");
+  if (!m?.address) return;
+  const last = (await session.get<number>("miner:checked")) ?? 0;
+  // Asked about every 2 minutes, so a 5-minute delay is announced within 5 to 7 minutes.
+  if (Date.now() - last < 2 * 60_000 - 5_000) return;
+  await session.set("miner:checked", Date.now());
+  const state = await minerState(m.pool, m.address);
+  const before = await local.get<MinerAlertState>("minerAlertState");
+  const memory = before && before.address === m.address ? before : { address: m.address, offline: [], known: [] };
+  const { offline, fresh, known, total, idleSince } = offlineCheck(state, memory, m.afterMinutes, Date.now() / 1000);
+  // Stopped following meanwhile: say nothing and keep nothing.
+  if ((await local.get<MinerAlert>("minerAlert"))?.address !== m.address) return;
+  if (fresh.length) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: chrome.runtime.getURL("icon/128.png"),
+      title: fresh.length === 1 ? `${fresh[0]} stopped mining` : `${fresh.length} workers stopped mining`,
+      message: `No work received for ${m.afterMinutes} min or more. ${Math.max(0, total - offline.length)} of ${total} worker${total === 1 ? "" : "s"} still mining.`,
+    });
+  }
+  await local.set("minerAlertState", { address: m.address, offline, known, idleSince } satisfies MinerAlertState);
+}

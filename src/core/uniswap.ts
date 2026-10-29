@@ -69,9 +69,9 @@ export async function uniSwap(rpc: EthRpc, account: { address: string; privateKe
   const spend = side === "sell" ? q.wprl : (q.usdt * (10_000n + slippageBps)) / 10_000n;
   const [balance, allowance] = await Promise.all([rpc.tokenBalance(tokenIn, account.address), rpc.allowance(tokenIn, account.address, UNI_ROUTER)]);
   if (balance < spend) throw new Error(side === "sell" ? "Not enough wPRL on your Ethereum address" : "Not enough USDT on your Ethereum address");
-  const send = async (to: string, data: Uint8Array) => {
+  const send = async (to: string, data: Uint8Array, swap = false) => {
     const signed = signEthTx(await rpc.prepare(account.address, to, data), account.privateKey);
-    return rpc.send(signed.raw, signed.hash);
+    return rpc.send(signed.raw, signed.hash, swap, account.address);
   };
 
   if (allowance < spend) {
@@ -96,7 +96,7 @@ export async function uniSwap(rpc: EthRpc, account: { address: string; privateKe
     deadline(),
     fee ? [trade, side === "sell" ? routeData.sweepWithFee(USDT, minOut, account.address, fee.bips, fee.recipient) : routeData.sweepWithFee(WPRL_CONTRACT, q.wprl, account.address, fee.bips, fee.recipient)] : [trade],
   );
-  const hash = await send(UNI_ROUTER, data);
+  const hash = await send(UNI_ROUTER, data, true);
   if (!(await rpc.wait(hash))) throw new Error("The swap was refused, usually because the price moved. Nothing was exchanged; only the Ethereum fee was spent.");
   return hash;
 }
@@ -266,6 +266,8 @@ export async function swapRoute(
   fee?: { bips: bigint; recipient: string },
   slippageBps = 100n,
   eth = false,
+  /** Called with the swap's hash as soon as it is sent, before it is in a block. */
+  onSent?: (hash: string) => Promise<void> | void,
 ): Promise<string> {
   const tokenIn = route.tokens[0]!, tokenOut = route.tokens[route.tokens.length - 1]!;
   const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
@@ -274,9 +276,9 @@ export async function swapRoute(
     ? [await rpc.ethBalance(account.address), route.amountIn]
     : await Promise.all([rpc.tokenBalance(tokenIn, account.address), rpc.allowance(tokenIn, account.address, UNI_ROUTER)]);
   if (balance < route.amountIn) throw new Error(ethIn ? "Not enough ETH on your Ethereum address" : "Not enough of the token you are giving on your Ethereum address");
-  const send = async (to: string, data: Uint8Array, value = 0n) => {
+  const send = async (to: string, data: Uint8Array, value = 0n, swap = false) => {
     const signed = signEthTx(await rpc.prepare(account.address, to, data, value), account.privateKey);
-    return rpc.send(signed.raw, signed.hash);
+    return rpc.send(signed.raw, signed.hash, swap, account.address);
   };
   const path = encodePath(route.tokens, route.fees);
 
@@ -303,7 +305,8 @@ export async function swapRoute(
     : fee
       ? [routeData.swap(path, ROUTER_ITSELF, route.amountIn, minOut), routeData.sweepWithFee(tokenOut, minOut, account.address, fee.bips, fee.recipient)]
       : [routeData.swap(path, account.address, route.amountIn, minOut)];
-  const hash = await send(UNI_ROUTER, routeData.multicallBy(deadline(), calls), ethIn ? route.amountIn : 0n);
+  const hash = await send(UNI_ROUTER, routeData.multicallBy(deadline(), calls), ethIn ? route.amountIn : 0n, true);
+  await onSent?.(hash);
   if (!(await rpc.wait(hash))) throw new Error("The swap was refused, usually because the price moved. Nothing was exchanged; only the Ethereum fee was spent.");
   return hash;
 }
@@ -382,7 +385,7 @@ export async function ethBuy(rpc: EthRpc, account: { address: string; privateKey
   const to = fee ? ROUTER_ITSELF : account.address;
   const calls = [routeData.swapOut(reversed, to, q.wprl, maxIn), ...(fee ? [routeData.sweepWithFee(WPRL_CONTRACT, q.wprl, account.address, fee.bips, fee.recipient)] : []), routeData.refundEth()];
   const signed = signEthTx(await rpc.prepare(account.address, UNI_ROUTER, routeData.multicallBy(deadline(), calls), maxIn), account.privateKey);
-  const hash = await rpc.send(signed.raw, signed.hash);
+  const hash = await rpc.send(signed.raw, signed.hash, true, account.address);
   if (!(await rpc.wait(hash))) throw new Error("The swap was refused, usually because the price moved. Nothing was exchanged; only the Ethereum fee was spent.");
   return hash;
 }
