@@ -1,0 +1,27 @@
+# Rebuilds Keshi from this code on GitHub's own machines and checks that it makes
+# exactly the files listed in verify/chrome-<version>.sha256 (the Store package).
+# Anyone can read the result in the Actions tab; nobody's key or secret is used.
+name: Rebuild and verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+      - run: npm run build
+      - run: node verify.mjs
