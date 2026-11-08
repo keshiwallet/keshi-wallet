@@ -93,6 +93,8 @@ export interface PeriodStats {
   allTime: bigint; // every payout ever seen
   /** Dollar value of the period's payouts at the price of each payout's day, when a price series is given. */
   thenUsd?: number;
+  /** Payouts in the period that had no price for their day (before the price history starts): left out of thenUsd. */
+  unpriced?: number;
 }
 
 /**
@@ -139,10 +141,12 @@ export function periodStats(activity: Activity[], period: Period, now = Date.now
     for (let i = buckets.length - 1; i >= 0; i--) if (ms >= buckets[i]!.start) return buckets[i];
     return undefined;
   };
-  let total = 0n, thenUsd = 0;
+  let total = 0n, thenUsd = 0, unpriced = 0;
   const sorted = prices ? [...prices].sort((a, b) => a.time - b.time) : null;
   const priceAt = (sec: number) => {
     if (!sorted?.length) return undefined;
+    // A payout from before the first known price has no price: it is left out of the dollar figure, never given a later one.
+    if (sec < sorted[0]!.time - 86_400) return undefined;
     let lo = 0, hi = sorted.length - 1;
     while (lo < hi) {
       const mid = (lo + hi + 1) >> 1;
@@ -161,8 +165,9 @@ export function periodStats(activity: Activity[], period: Period, now = Date.now
     total += p.net;
     const pr = priceAt(p.time || Math.floor(now / 1000));
     if (pr !== undefined) thenUsd += (Number(p.net) / 1e8) * pr;
+    else if (sorted) unpriced++;
   }
-  return { period, buckets, total, perDay: total / BigInt(spanDays), days: spanDays, allTime, thenUsd: sorted ? thenUsd : undefined };
+  return { period, buckets, total, perDay: total / BigInt(spanDays), days: spanDays, allTime, thenUsd: sorted ? thenUsd : undefined, unpriced: sorted ? unpriced : undefined };
 }
 
 export function payoutsCsv(payouts: Activity[]): string {

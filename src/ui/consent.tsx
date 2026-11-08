@@ -22,17 +22,26 @@ export function ConsentGate({ children }: { children: ReactNode }) {
   const inTab = new URLSearchParams(location.search).has("consent");
   const [step, setStep] = useState<Step>("loading");
   const [noRemove, setNoRemove] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   useEffect(() => {
     if (inTab) document.body.classList.add("consent-tab");
-    hasConsent().then((ok) => setStep(ok ? (inTab ? "done" : "ok") : "ask"));
+    // Storage that cannot be read means no consent is recorded: ask, rather than stay on a blank screen.
+    hasConsent()
+      .then((ok) => setStep(ok ? (inTab ? "done" : "ok") : "ask"))
+      .catch(() => setStep("ask"));
   }, [inTab]);
 
   if (step === "ok") return <>{children}</>;
   if (step === "loading") return null;
 
   const accept = async () => {
-    await giveConsent();
+    try {
+      await giveConsent();
+    } catch (e) {
+      setSaveError(`Your choice could not be saved (${e instanceof Error ? e.message : String(e)}). Try again.`);
+      return;
+    }
     setStep(inTab ? "done" : "ok");
   };
 
@@ -57,7 +66,7 @@ export function ConsentGate({ children }: { children: ReactNode }) {
                 Protect (private swaps), the Pearl bridge, and LI.FI through Keshi's relay (Buy with USDT).
               </li>
               <li>
-                <b>Your payout address</b>, only if you choose to follow a miner: Kryptex or HeroMiners.
+                <b>Your payout address</b>, only if you choose to follow a miner: Kryptex, HeroMiners, Peryn, PearlHash, Pearl Fortune or LuckyPool.
               </li>
             </ul>
           </section>
@@ -75,6 +84,11 @@ export function ConsentGate({ children }: { children: ReactNode }) {
             </p>
           </section>
 
+          {saveError && (
+            <p className="error" role="alert">
+              {saveError}
+            </p>
+          )}
           <div className="consent-actions">
             <button className="btn primary" onClick={accept}>
               Accept

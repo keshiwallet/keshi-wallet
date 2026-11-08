@@ -33,7 +33,7 @@ describe("private Ethereum sending (Flashbots Protect)", () => {
 
   it("never sends a swap publicly when Flashbots does not answer", async () => {
     const n = net((url) => (url === PRIVATE_RPC ? new Error("offline") : url.startsWith(PRIVATE_STATUS) ? { status: "UNKNOWN" } : { jsonrpc: "2.0", id: 1, result: null }));
-    await expect(new EthRpc(n.fetcher).send("0x02", HASH, true)).rejects.toThrow(/Nothing was swapped/);
+    await expect(new EthRpc(n.fetcher).send("0x02", HASH, true)).rejects.toThrow(/cannot be confirmed yet/);
     expect(n.calls.filter((c) => c.includes("eth_sendRawTransaction"))).toEqual([`${PRIVATE_RPC} eth_sendRawTransaction`]);
   });
 
@@ -67,7 +67,7 @@ describe("private Ethereum sending (Flashbots Protect)", () => {
     const n = net((_u, m) => ({
       jsonrpc: "2.0",
       id: 1,
-      result: m === "eth_getTransactionCount" ? "0x1" : m === "eth_estimateGas" ? "0x5208" : m === "eth_maxPriorityFeePerGas" ? "0x0" : { baseFeePerGas: "0x3b9aca00" },
+      result: m === "eth_chainId" ? "0x1" : m === "eth_getTransactionCount" ? "0x1" : m === "eth_estimateGas" ? "0x5208" : m === "eth_maxPriorityFeePerGas" ? "0x0" : { baseFeePerGas: "0x3b9aca00" },
     }));
     const tx = await new EthRpc(n.fetcher).prepare("0x" + "11".repeat(20), "0x" + "22".repeat(20), new Uint8Array(0), 1n);
     expect(tx.maxPriorityFeePerGas).toBe(10_000_000n);
@@ -77,7 +77,7 @@ describe("private Ethereum sending (Flashbots Protect)", () => {
     const n = net((_u, m) => ({
       jsonrpc: "2.0",
       id: 1,
-      result: m === "eth_getTransactionCount" ? "0x1" : m === "eth_estimateGas" ? "0x" + (900_000).toString(16) : m === "eth_maxPriorityFeePerGas" ? "0x3b9aca00" : { baseFeePerGas: "0x3b9aca00" },
+      result: m === "eth_chainId" ? "0x1" : m === "eth_getTransactionCount" ? "0x1" : m === "eth_estimateGas" ? "0x" + (900_000).toString(16) : m === "eth_maxPriorityFeePerGas" ? "0x3b9aca00" : { baseFeePerGas: "0x3b9aca00" },
     }));
     const tx = await new EthRpc(n.fetcher).prepare("0x" + "11".repeat(20), "0x" + "22".repeat(20), new Uint8Array(0), 1n);
     expect(tx.gasLimit).toBe(900_000n);
@@ -97,7 +97,7 @@ describe("private Ethereum sending (Flashbots Protect)", () => {
     const n = net((url, m) => {
       if (url === PRIVATE_RPC) return { jsonrpc: "2.0", id: 1, result: signed.hash };
       // Public servers do not see the private swap: they still say 5.
-      return { jsonrpc: "2.0", id: 1, result: m === "eth_getTransactionCount" ? "0x5" : m === "eth_estimateGas" ? "0x5208" : m === "eth_maxPriorityFeePerGas" ? "0x3b9aca00" : { baseFeePerGas: "0x3b9aca00" } };
+      return { jsonrpc: "2.0", id: 1, result: m === "eth_chainId" ? "0x1" : m === "eth_getTransactionCount" ? "0x5" : m === "eth_estimateGas" ? "0x5208" : m === "eth_maxPriorityFeePerGas" ? "0x3b9aca00" : { baseFeePerGas: "0x3b9aca00" } };
     });
     const rpc = new EthRpc(n.fetcher);
     await rpc.send(signed.raw, signed.hash, true, from);
@@ -111,14 +111,14 @@ describe("private Ethereum sending (Flashbots Protect)", () => {
     let copy = "";
     keepPrivatePending(saved, (j) => (copy = j));
     expect(copy).toContain('"nonce":"9"');
-    const n = net((url, m) => (url.startsWith(PRIVATE_STATUS) ? { status: "PENDING" } : { jsonrpc: "2.0", id: 1, result: m === "eth_getTransactionCount" ? "0x9" : m === "eth_estimateGas" ? "0x5208" : m === "eth_maxPriorityFeePerGas" ? "0x3b9aca00" : { baseFeePerGas: "0x3b9aca00" } }));
+    const n = net((url, m) => (url.startsWith(PRIVATE_STATUS) ? { status: "PENDING" } : { jsonrpc: "2.0", id: 1, result: m === "eth_chainId" ? "0x1" : m === "eth_getTransactionCount" ? "0x9" : m === "eth_estimateGas" ? "0x5208" : m === "eth_maxPriorityFeePerGas" ? "0x3b9aca00" : { baseFeePerGas: "0x3b9aca00" } }));
     expect((await new EthRpc(n.fetcher).prepare(from, "0x" + "33".repeat(20), new Uint8Array(0), 1n)).nonce).toBe(10n);
   });
 
   it("frees the number of a private swap Flashbots gave up on, so the next transaction does not wait behind a gap", async () => {
     const from = "0x" + "66".repeat(20);
     keepPrivatePending(JSON.stringify({ [from]: { hash: "0x" + "ef".repeat(32), nonce: "4", at: Date.now() } }), () => {});
-    const n = net((url, m) => (url.startsWith(PRIVATE_STATUS) ? { status: "FAILED" } : { jsonrpc: "2.0", id: 1, result: m === "eth_getTransactionCount" ? "0x4" : m === "eth_estimateGas" ? "0x5208" : m === "eth_maxPriorityFeePerGas" ? "0x3b9aca00" : { baseFeePerGas: "0x3b9aca00" } }));
+    const n = net((url, m) => (url.startsWith(PRIVATE_STATUS) ? { status: "FAILED" } : { jsonrpc: "2.0", id: 1, result: m === "eth_chainId" ? "0x1" : m === "eth_getTransactionCount" ? "0x4" : m === "eth_estimateGas" ? "0x5208" : m === "eth_maxPriorityFeePerGas" ? "0x3b9aca00" : { baseFeePerGas: "0x3b9aca00" } }));
     expect((await new EthRpc(n.fetcher).prepare(from, "0x" + "33".repeat(20), new Uint8Array(0), 1n)).nonce).toBe(4n);
   });
 });

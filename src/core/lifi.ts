@@ -219,39 +219,123 @@ export const LIFI_BRIDGE_CALLS: Record<string, number> = {
   "0x21a3af52": 96, // swapAndStartBridgeTokensViaUnit
 };
 
+/** The functions above whose second argument is the list of swaps run on the source chain before the bridge (`LibSwap.SwapData[]`). */
+export const LIFI_SWAP_CALLS = new Set(["0x3a3f7332", "0x1794958f", "0x9b054bc4", "0x63267469", "0x3cc9517b", "0x4f3b0759", "0x8fd4d4dd", "0xee3314a1", "0x2c7d2db0", "0x762aea18", "0x07b8e4c7", "0x76ad76fe", "0x606326ff", "0x9c4b6dd9", "0x7bf96e0a", "0x4c279d6b", "0x6d21c5df", "0xb9eaf86d", "0x80c65808", "0x22256e89", "0x02631b09", "0x95726782", "0x5bb5d448", "0x637f1d04", "0xb4f37581", "0x17917a4e", "0xa3443faa", "0xa8f66666", "0xa6010a66", "0xf26e657f", "0xc46059b2", "0xad673d88", "0x21a3af52"]);
+/** At most this many swaps before the bridge: a route needing more is not one Keshi will sign. */
+export const LIFI_SWAPS_MAX = 3;
+
+/** One swap LI.FI's contract runs on the source chain before bridging, as written in the transaction. */
+export interface LifiSwap {
+  callTo: string;
+  approveTo: string;
+  sendingAssetId: string;
+  receivingAssetId: string;
+  fromAmount: bigint;
+  requiresDeposit: boolean;
+  /** Bytes of the call to the exchange: Keshi cannot read them (each exchange has its own format). */
+  callDataBytes: number;
+}
+
+export interface BridgeData {
+  receiver: string;
+  destinationChainId: bigint;
+  minAmount: bigint;
+  sendingAssetId: string;
+  hasSourceSwaps: boolean;
+  hasDestinationCall: boolean;
+  /** The swaps before the bridge, when the function takes them; absent for a plain bridge call. */
+  swaps?: LifiSwap[];
+}
+
 /**
  * Reads, inside the transaction LI.FI prepared, who will receive the funds and on which chain.
  * Every cross-chain call on LI.FI's contract takes a `BridgeData` struct as its first argument
  * (transactionId, bridge, integrator, referrer, sendingAssetId, receiver, minAmount,
- * destinationChainId, hasSourceSwaps, hasDestinationCall). Anything that does not decode that
- * way is refused: the wallet only signs what it can read.
+ * destinationChainId, hasSourceSwaps, hasDestinationCall); the swapAndStart… functions take the
+ * list of source-chain swaps as their second. Anything that does not decode that way is refused:
+ * the wallet only signs what it can read. What it still cannot read: the bytes each swap hands to
+ * its exchange, and the bridge's own arguments after these two.
  */
-export function decodeBridgeData(data: string): { receiver: string; destinationChainId: bigint; minAmount: bigint; sendingAssetId: string; hasDestinationCall: boolean } {
+export function decodeBridgeData(data: string): BridgeData {
   const hex = data.startsWith("0x") ? data.slice(2) : data;
   if (hex.length < 8 + 64) throw new Error("LI.FI's transaction is too short to read");
-  const head = LIFI_BRIDGE_CALLS["0x" + hex.slice(0, 8).toLowerCase()];
+  const selector = "0x" + hex.slice(0, 8).toLowerCase();
+  const head = LIFI_BRIDGE_CALLS[selector];
   if (head === undefined) throw new Error("LI.FI's transaction calls a function Keshi does not know. Nothing was sent.");
   const body = hex.slice(8); // after the 4-byte selector
+  const words = Math.floor(body.length / 64);
+  const bad = () => new Error("LI.FI's transaction could not be read");
   const word = (i: number): string => {
     const w = body.slice(i * 64, i * 64 + 64);
-    if (w.length !== 64) throw new Error("LI.FI's transaction could not be read");
+    if (w.length !== 64) throw bad();
     return w;
   };
-  const offset = BigInt("0x" + word(0));
+  const uint = (w: string): bigint => BigInt("0x" + w);
+  // An offset or a length is a word index into the body: anything beyond the body is not readable.
+  const index = (w: string): number => {
+    const n = uint(w);
+    if (n % 32n !== 0n || n / 32n > BigInt(words)) throw bad();
+    return Number(n / 32n);
+  };
+  const offset = uint(word(0));
   // The struct sits right after the arguments' head, where the ABI puts the first dynamic argument.
-  if (offset !== BigInt(head) || offset > BigInt(body.length / 2)) throw new Error("LI.FI's transaction could not be read");
+  if (offset !== BigInt(head) || offset > BigInt(body.length / 2)) throw bad();
   const base = Number(offset / 32n);
   const addr = (w: string): string => {
-    if (!/^0{24}[0-9a-fA-F]{40}$/.test(w)) throw new Error("LI.FI's transaction could not be read");
+    if (!/^0{24}[0-9a-fA-F]{40}$/.test(w)) throw bad();
     return "0x" + w.slice(24);
+  };
+  const flag = (w: string): boolean => {
+    if (!/^0{63}[01]$/.test(w)) throw bad();
+    return w.endsWith("1");
   };
   const sendingAssetId = addr(word(base + 4));
   const receiver = addr(word(base + 5));
-  const minAmount = BigInt("0x" + word(base + 6));
-  const destinationChainId = BigInt("0x" + word(base + 7));
-  const flag = (w: string) => /^0{63}[01]$/.test(w);
-  if (!flag(word(base + 8)) || !flag(word(base + 9))) throw new Error("LI.FI's transaction could not be read");
-  return { receiver, destinationChainId, minAmount, sendingAssetId, hasDestinationCall: word(base + 9).endsWith("1") };
+  const minAmount = uint(word(base + 6));
+  const destinationChainId = uint(word(base + 7));
+  const hasSourceSwaps = flag(word(base + 8));
+  const hasDestinationCall = flag(word(base + 9));
+  let swaps: LifiSwap[] | undefined;
+  if (LIFI_SWAP_CALLS.has(selector)) {
+    // SwapData[]: the array's offset in the head, then its length, then one offset per struct (from the array's data),
+    // then each struct: callTo, approveTo, sendingAssetId, receivingAssetId, fromAmount, callData offset, requiresDeposit.
+    const arr = index(word(1));
+    const n = uint(word(arr));
+    if (n < 1n || n > BigInt(LIFI_SWAPS_MAX)) throw bad();
+    swaps = [];
+    for (let i = 0; i < Number(n); i++) {
+      const at = arr + 1 + index(word(arr + 1 + i));
+      const callDataAt = at + index(word(at + 5));
+      const callDataBytes = uint(word(callDataAt));
+      if (callDataBytes > 65_536n || (callDataAt + 1) * 64 + Number(callDataBytes) * 2 > body.length) throw bad();
+      swaps.push({ callTo: addr(word(at)), approveTo: addr(word(at + 1)), sendingAssetId: addr(word(at + 2)), receivingAssetId: addr(word(at + 3)), fromAmount: uint(word(at + 4)), requiresDeposit: flag(word(at + 6)), callDataBytes: Number(callDataBytes) });
+    }
+  }
+  return { receiver, destinationChainId, minAmount, sendingAssetId, hasSourceSwaps, hasDestinationCall, swaps };
+}
+
+/**
+ * Binds the swaps written in the transaction to the purchase the user approved: the first swap takes exactly
+ * the USDT typed, from the user, and no other token; each swap feeds the next; the last one yields the token
+ * the bridge sends; no swap is a call on the USDT contract itself. A plain bridge call must send that USDT.
+ * Throws with the reason when the transaction says otherwise.
+ */
+export function checkSourceSwaps(inside: BridgeData, usdt: string, fromAmount: bigint): void {
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  if (!inside.swaps) {
+    if (inside.hasSourceSwaps) throw new Error("LI.FI's transaction announces a swap it does not carry. Nothing was sent.");
+    if (!same(inside.sendingAssetId, usdt)) throw new Error("LI.FI's transaction would bridge a token other than your USDT. Nothing was sent.");
+    return;
+  }
+  if (!inside.hasSourceSwaps) throw new Error("LI.FI's transaction carries a swap it does not announce. Nothing was sent.");
+  const first = inside.swaps[0]!;
+  if (!same(first.sendingAssetId, usdt) || first.fromAmount !== fromAmount || !first.requiresDeposit) throw new Error("LI.FI's transaction would swap something other than the USDT you entered. Nothing was sent.");
+  for (let i = 0; i < inside.swaps.length; i++) {
+    const sw = inside.swaps[i]!;
+    if (same(sw.callTo, usdt) || same(sw.approveTo, usdt) || /^0x0{40}$/.test(sw.callTo)) throw new Error("LI.FI's transaction would call the USDT contract directly. Nothing was sent.");
+    if (i > 0 && (!same(sw.sendingAssetId, inside.swaps[i - 1]!.receivingAssetId) || sw.requiresDeposit)) throw new Error("LI.FI's swaps do not follow one another. Nothing was sent.");
+  }
+  if (!same(inside.swaps[inside.swaps.length - 1]!.receivingAssetId, inside.sendingAssetId)) throw new Error("LI.FI's transaction would bridge a token other than the one its swap yields. Nothing was sent.");
 }
 
 /** Reads LI.FI's answer into the few figures the wallet shows. Throws on anything that would be unsafe to sign. */
@@ -276,6 +360,8 @@ export function parseQuote(j: any, want: { fromChainId: bigint; fromToken: strin
   if (inside.destinationChainId !== 1n) throw new Error("LI.FI's transaction would deliver to another chain. Nothing was sent.");
   // An instruction run on Ethereum after the bridge decides for itself who gets the money, and Keshi cannot read it.
   if (inside.hasDestinationCall) throw new Error("LI.FI's route ends with a step on Ethereum that Keshi cannot check. Nothing was sent; try again, or try another chain.");
+  // The swaps before the bridge, if any, must start from exactly the USDT entered and end in the token bridged.
+  checkSourceSwaps(inside, want.fromToken, want.fromAmount);
   // USDT is a token: LI.FI's contract needs a permission, and it must be for LI.FI's contract itself, never missing.
   const approval = String(e.approvalAddress ?? "");
   if (!/^0x[0-9a-fA-F]{40}$/.test(approval) || approval.toLowerCase() !== diamond) throw new Error("LI.FI asks for a permission to an unexpected address. Nothing was sent.");

@@ -17,6 +17,8 @@ export interface Activity {
 }
 
 export interface Snapshot {
+  /** False when some address's history was cut by the indexer's page limit: the activity is then the recent part only. */
+  historyComplete?: boolean;
   updated: number;
   height: number;
   balance: bigint; // confirmed + pending
@@ -50,6 +52,7 @@ export async function scan(account: Account, indexer: Indexer, extra: ExtraAddre
   const addresses: Snapshot["addresses"] = [];
   const txs = new Map<string, RawTx>();
   const withCoins: string[] = [];
+  let historyComplete = true;
   let balance = 0n;
   let pending = 0n;
   const firstUnused: Record<string, Derived> = {};
@@ -63,6 +66,7 @@ export async function scan(account: Account, indexer: Indexer, extra: ExtraAddre
     pending = info.unconfirmed;
     if (info.txCount > 0) withCoins.push(d.address);
     for (const t of info.txs) txs.set(t.txid, t);
+    if (info.complete === false) historyComplete = false;
     firstUnused["false"] = d;
     firstUnused["true"] = d;
   }
@@ -84,6 +88,8 @@ export async function scan(account: Account, indexer: Indexer, extra: ExtraAddre
           pending += info.unconfirmed;
           if (info.balance + info.unconfirmed > 0n || info.unconfirmed !== 0n) withCoins.push(d.address);
           for (const t of info.txs) txs.set(t.txid, t);
+          if (info.complete === false) historyComplete = false;
+    if (info.complete === false) historyComplete = false;
         } else {
           empty++;
           firstUnused[String(change)] ??= d;
@@ -102,6 +108,7 @@ export async function scan(account: Account, indexer: Indexer, extra: ExtraAddre
     pending += info.unconfirmed;
     if (info.balance + info.unconfirmed > 0n || info.unconfirmed !== 0n) withCoins.push(x.address);
     for (const t of info.txs) txs.set(t.txid, t);
+    if (info.complete === false) historyComplete = false;
   }
 
   const [status, utxoLists] = await Promise.all([
@@ -131,6 +138,7 @@ export async function scan(account: Account, indexer: Indexer, extra: ExtraAddre
     changeAddr: firstUnused["true"]!,
     utxos,
     activity,
+    historyComplete,
   };
 }
 

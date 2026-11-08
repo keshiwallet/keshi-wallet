@@ -14,6 +14,27 @@ const bridgeCalldata = (receiver: string, destChain = 1n, minAmount = 100_000_00
   return "0x" + "14d53077" + head + struct + w(5n) + w("0x" + "72656c6179" + "0".repeat(54)) + w(5n) + w("0x" + "6b65736869" + "0".repeat(54));
 };
 
+/**
+ * swapAndStartBridgeTokensViaStargate(BridgeData, SwapData[], StargateData): one swap of the USDT into `out`
+ * on an exchange, then the bridge of `out`. Each piece can be bent to test the checks.
+ */
+const swapCalldata = (receiver: string, opts: { out?: string; fromAmount?: bigint; callTo?: string; approveTo?: string; sendingAsset?: string; swaps?: number; announce?: boolean; deposit?: boolean; bridgeAsset?: string; count?: bigint } = {}) => {
+  const w = (v: bigint | string) => (typeof v === "string" ? v.replace(/^0x/, "").toLowerCase().padStart(64, "0") : v.toString(16).padStart(64, "0"));
+  const out = opts.out ?? "0x" + "ee".repeat(20);
+  const n = opts.swaps ?? 1;
+  const swaps: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const callData = "aabbccdd";
+    const s = [w(opts.callTo ?? "0x" + "cc".repeat(20)), w(opts.approveTo ?? opts.callTo ?? "0x" + "cc".repeat(20)), w(i === 0 ? (opts.sendingAsset ?? ARB.usdt.address) : out), w(out), w(i === 0 ? (opts.fromAmount ?? 100_000_000n) : 0n), w(0xe0n), w(opts.deposit === false ? 0n : i === 0 ? 1n : 0n), w(4n), callData.padEnd(64, "0")].join("");
+    swaps.push(s);
+  }
+  const arrayData = w(opts.count ?? BigInt(n)) + swaps.map((_, i) => w(BigInt(32 * n + swaps.slice(0, i).reduce((a, x) => a + x.length / 2, 0)))).join("") + swaps.join("");
+  const struct = [w("0x" + "11".repeat(32)), w(0x140n), w(0x180n), w(0n), w(opts.bridgeAsset ?? out), w(receiver), w(1n), w(1n), w(opts.announce === false ? 0n : 1n), w(0n)].join("") + w(8n) + w("0x" + "7374617267617465" + "0".repeat(48)) + w(5n) + w("0x" + "6b65736869" + "0".repeat(54));
+  const structBytes = struct.length / 2;
+  const head = w(0x60n) + w(BigInt(0x60 + structBytes)) + w(BigInt(0x60 + structBytes + arrayData.length / 2));
+  return "0x" + "a6010a66" + head + struct + arrayData + w(0n) + w(0n);
+};
+
 const quote = (over: any = {}) => ({
   id: "q1",
   tool: "relay",
@@ -76,9 +97,41 @@ describe("LI.FI quotes", () => {
     expect(c.parseQuote(quote(tx(99_500_000n)), want).fromAmount).toBe(100_000_000n); // fees taken before bridging: fine
     expect(() => c.parseQuote(quote(tx(500_000_000n)), want)).toThrow(/different amount than the quote/);
     expect(() => c.parseQuote(quote(tx(0n)), want)).toThrow(/different amount than the quote/);
-    // After a swap to ETH on the source chain the bridged amount is in wei: not compared with USDT units.
+    // After a swap on the source chain the bridged amount is in the other token's units: not compared with USDT units.
+    expect(c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data: swapCalldata(FROM) } }), want).fromAmount).toBe(100_000_000n);
+    // A plain bridge call must bridge the USDT itself: a zero address there is not the user's token.
     const viaEth = bridgeCalldata(FROM, 1n, 25_000_000_000_000_000n).replace(ARB.usdt.address.slice(2).toLowerCase(), "0".repeat(40));
-    expect(c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data: viaEth } }), want).fromAmount).toBe(100_000_000n);
+    expect(() => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data: viaEth } }), want)).toThrow(/other than your USDT/);
+  });
+  it("binds the swaps before the bridge to the USDT entered (second audit, November 2026)", () => {
+    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };
+    const q = (data: string) => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data } }), want);
+    const d = c.decodeBridgeData(swapCalldata(FROM));
+    expect(d.hasSourceSwaps).toBe(true);
+    expect(d.swaps!.length).toBe(1);
+    expect(d.swaps![0]!.sendingAssetId.toLowerCase()).toBe(ARB.usdt.address.toLowerCase());
+    expect(d.swaps![0]!.fromAmount).toBe(100_000_000n);
+    expect(d.swaps![0]!.callDataBytes).toBe(4);
+    expect(q(swapCalldata(FROM)).fromAmount).toBe(100_000_000n);
+    expect(q(swapCalldata(FROM, { swaps: 2 })).fromAmount).toBe(100_000_000n);
+    // The swap takes more than typed, or another token, or does not take it from the user.
+    expect(() => q(swapCalldata(FROM, { fromAmount: 5_000_000_000n }))).toThrow(/other than the USDT you entered/);
+    expect(() => q(swapCalldata(FROM, { sendingAsset: "0x" + "77".repeat(20) }))).toThrow(/other than the USDT you entered/);
+    expect(() => q(swapCalldata(FROM, { deposit: false }))).toThrow(/other than the USDT you entered/);
+    // The "exchange" is the USDT contract itself, or nobody.
+    expect(() => q(swapCalldata(FROM, { callTo: ARB.usdt.address }))).toThrow(/USDT contract directly/);
+    expect(() => q(swapCalldata(FROM, { callTo: "0x" + "cc".repeat(20), approveTo: ARB.usdt.address }))).toThrow(/USDT contract directly/);
+    expect(() => q(swapCalldata(FROM, { callTo: "0x" + "00".repeat(20) }))).toThrow(/USDT contract directly/);
+    // The bridge sends a token the swap did not yield, or the flag and the list disagree.
+    expect(() => q(swapCalldata(FROM, { bridgeAsset: "0x" + "99".repeat(20) }))).toThrow(/other than the one its swap yields/);
+    expect(() => q(swapCalldata(FROM, { announce: false }))).toThrow(/does not announce/);
+    expect(() => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data: bridgeCalldata(FROM).slice(0, 10 + 64 * 2 + 64 * 8) + "0".repeat(63) + "1" + bridgeCalldata(FROM).slice(10 + 64 * 2 + 64 * 9) } }), want)).toThrow(/announces a swap/);
+    // Too many swaps, or a list longer than the transaction.
+    expect(() => c.decodeBridgeData(swapCalldata(FROM, { swaps: 4 }))).toThrow(/could not be read/);
+    expect(() => c.decodeBridgeData(swapCalldata(FROM, { count: 2n }))).toThrow(/could not be read/);
+    expect(() => c.decodeBridgeData(swapCalldata(FROM, { count: 2n ** 200n }))).toThrow(/could not be read/);
+    expect(c.LIFI_SWAP_CALLS.size).toBe(33);
+    for (const sel of c.LIFI_SWAP_CALLS) expect(c.LIFI_BRIDGE_CALLS[sel]).toBeGreaterThanOrEqual(64);
   });
   it("refuses a route that loses too much, a missing dollar value, or a transaction asking for the chain's coin", () => {
     const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };
@@ -167,14 +220,14 @@ describe("signing on another chain", () => {
     expect(c.signEthTx(tx, acct.privateKey).raw).not.toBe(raw);
   });
   it("accepts a zero base fee only where the chain works that way", async () => {
-    const answers: Record<string, unknown> = { eth_getTransactionCount: "0x1", eth_estimateGas: "0x5208", eth_maxPriorityFeePerGas: "0x0", eth_getBlockByNumber: { baseFeePerGas: "0x0" }, eth_gasPrice: "0x3b9aca00" };
+    const answers: Record<string, unknown> = { eth_chainId: "0x1", eth_getTransactionCount: "0x1", eth_estimateGas: "0x5208", eth_maxPriorityFeePerGas: "0x0", eth_getBlockByNumber: { baseFeePerGas: "0x0" }, eth_gasPrice: "0x3b9aca00" };
     const rpc = new c.EthRpc(async (_u: any, init: any) => ({ ok: true, json: async () => ({ id: 1, result: answers[JSON.parse(init.body).method] }) }) as any, ["https://x"]);
     await expect(rpc.prepare(FROM, ARB.usdt.address, new Uint8Array(0))).rejects.toThrow(/fee/);
     const tx = await rpc.prepare(FROM, ARB.usdt.address, new Uint8Array(0), 0n, { zeroBaseFee: true });
     expect(tx.maxFeePerGas).toBe(1_200_000_000n);
   });
   it("refuses a gas price above the chain's ceiling, and a server's gas limit above the wallet's", async () => {
-    const answers: Record<string, unknown> = { eth_getTransactionCount: "0x1", eth_estimateGas: "0x5208", eth_maxPriorityFeePerGas: "0x0", eth_getBlockByNumber: { baseFeePerGas: "0x0" }, eth_gasPrice: "0x22ecb25c00" };
+    const answers: Record<string, unknown> = { eth_chainId: "0x1", eth_getTransactionCount: "0x1", eth_estimateGas: "0x5208", eth_maxPriorityFeePerGas: "0x0", eth_getBlockByNumber: { baseFeePerGas: "0x0" }, eth_gasPrice: "0x22ecb25c00" };
     const rpc = new c.EthRpc(async (_u: any, init: any) => ({ ok: true, json: async () => ({ id: 1, result: answers[JSON.parse(init.body).method] }) }) as any, ["https://x"]);
     const bsc = c.sourceChain("bsc");
     await expect(rpc.prepare(FROM, bsc.usdt.address, new Uint8Array(0), 0n, bsc.limits)).rejects.toThrow(/far above normal/);

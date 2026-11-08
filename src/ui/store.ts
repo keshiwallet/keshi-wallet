@@ -882,8 +882,10 @@ export interface UsdtPurchase {
   done?: boolean;
   /** How it ended, kept for good: a failure or a refund must never turn into a neutral "Finished". */
   outcome?: "arrived" | "partial" | "refunded" | "failed";
-  /** USDT that arrived on Ethereum, as LI.FI reported it. */
+  /** USDT that arrived on Ethereum, as the Transfer event of the delivering transaction says (verified on chain). */
   received?: bigint;
+  /** The Ethereum transaction that delivered it, as LI.FI named it. */
+  receivingTx?: string;
   /** The Uniswap swap that turned the USDT into wPRL, once it is in a block. */
   swapped?: string;
   /** A swap sent and not yet seen in a block: never sent twice while the network still has it. */
@@ -911,8 +913,9 @@ export function purchaseOutcome(s: core.LifiStatus): UsdtPurchase["outcome"] | u
 /**
  * Carry out a LI.FI quote on the source chain: allow LI.FI's contract to take
  * the exact USDT amount when needed, then send the transaction LI.FI prepared.
- * The second signature only happens once the first is confirmed, so the user
- * can never be left with a stray permission and nothing sent.
+ * The second signature only happens once the first is confirmed. If the second
+ * step then fails, the permission (for that exact amount, to LI.FI's contract
+ * only) stays until a later purchase uses it: the user is told so.
  */
 export async function buyWithUsdt(secrets: core.Secrets, chain: core.SourceChain, q: core.LifiQuote, asked: bigint, onStep: (text: string) => void, leg: "usdt" | "eth" = "usdt"): Promise<string> {
   if (Date.now() - q.at > 5 * core.QUOTE_LIFETIME_MS) throw new Error("This quote has expired. Ask for a fresh one; nothing was sent.");
@@ -928,7 +931,7 @@ export async function buyWithUsdt(secrets: core.Secrets, chain: core.SourceChain
   if (allowance < q.fromAmount) {
     onStep(`Step 1 of 2: allowing LI.FI to take ${core.formatUnits(q.fromAmount, chain.usdt.decimals, 2)} USDT…`);
     try {
-      const tx = await rpc.prepare(acct.address, chain.usdt.address, core.callData.approve(q.approvalAddress, q.fromAmount), 0n, chain.limits);
+      const tx = await rpc.prepare(acct.address, chain.usdt.address, core.callData.approve(q.approvalAddress, q.fromAmount), 0n, { ...chain.limits, chainId: chain.chainId });
       const signed = core.signEthTx(tx, acct.privateKey, chain.chainId);
       const hash = await rpc.send(signed.raw, signed.hash);
       if (!(await rpc.wait(hash))) throw new Error("The permission step was rejected. No USDT was moved.");
@@ -936,10 +939,13 @@ export async function buyWithUsdt(secrets: core.Secrets, chain: core.SourceChain
       throw gasError(e);
     }
   }
-  onStep(allowance < q.fromAmount ? "Step 2 of 2: sending your USDT through LI.FI…" : "Sending your USDT through LI.FI…");
+  const approved = allowance < q.fromAmount;
+  onStep(approved ? "Step 2 of 2: sending your USDT through LI.FI…" : "Sending your USDT through LI.FI…");
+  // Once the permission is given, any failure before the send leaves it in place: said plainly, never hidden.
+  const leftover = (e: unknown) => (approved && e instanceof Error && !/could not confirm/.test(e.message) ? new Error(`${e.message} The permission from step 1 (${core.formatUnits(q.fromAmount, chain.usdt.decimals, 2)} USDT, to LI.FI's contract only) stays on your address until a purchase uses it.`) : e);
   try {
     const data = hexToBytes(q.tx.data.slice(2));
-    const tx = await rpc.prepare(acct.address, q.tx.to, data, q.tx.value, { ...chain.limits, minGas: q.tx.gasLimit ?? undefined });
+    const tx = await rpc.prepare(acct.address, q.tx.to, data, q.tx.value, { ...chain.limits, minGas: q.tx.gasLimit ?? undefined, chainId: chain.chainId });
     const signed = core.signEthTx(tx, acct.privateKey, chain.chainId);
     // Written down before it leaves: if the answer is lost on the way back, the purchase is still in the list and followed.
     const record: UsdtPurchase = { txHash: signed.hash, chain: chain.id, amount: q.fromAmount, to: leg, expected: q.toAmount, at: Date.now(), from: acct.address };
@@ -957,7 +963,7 @@ export async function buyWithUsdt(secrets: core.Secrets, chain: core.SourceChain
       throw new Error(`Keshi could not confirm that your USDT purchase went out (${msg}). It is in the list below: wait a few minutes before buying again, so you do not buy twice.`);
     }
   } catch (e) {
-    throw gasError(e);
+    throw leftover(gasError(e));
   }
 }
 
@@ -967,14 +973,27 @@ async function forgetPurchase(txHash: string): Promise<void> {
 }
 
 /**
- * USDT the second step may swap: what LI.FI says arrived, only when it says USDT arrived on Ethereum,
- * and never more than 3% above what was quoted; then no more than the address holds. A wrong or
- * hostile status can therefore never turn the user's other USDT into wPRL beyond this purchase.
+ * USDT the second step may swap: what the chain says this purchase delivered (the Transfer event of the
+ * delivering transaction, never a server's word), and never more than the address holds. Without that
+ * verified figure the swap is capped at the quote, and the screen says the amount is not verified: a
+ * wrong or hostile status can then move at most the quoted amount of the user's own USDT, never more.
  */
 export function usdtToSwap(p: UsdtPurchase, held: bigint): bigint {
   const ceiling = (p.expected * 103n) / 100n;
   const want = p.received !== undefined && p.received > 0n && p.received < ceiling ? p.received : p.expected < ceiling ? p.expected : ceiling;
   return held < want ? held : want;
+}
+
+/**
+ * What LI.FI says arrived, checked against Ethereum itself: USDT delivered to the buyer's own address by the
+ * transaction LI.FI names. Returns the verified amount and that transaction, or nothing to record when the
+ * chain does not confirm it (the purchase is then shown as not verified, and the swap capped at the quote).
+ */
+export async function verifiedArrival(s: core.LifiStatus, from: string, rpc = new core.EthRpc()): Promise<{ received: bigint; receivingTx: string } | undefined> {
+  if (!s.receivingTx || !s.receivedAmount || s.receivedToken?.toLowerCase() !== core.ETH_USDT.toLowerCase() || s.receivedChain !== 1n) return undefined;
+  const delivered = await rpc.tokenDelivered(s.receivingTx, core.ETH_USDT, from).catch(() => null);
+  if (!delivered) return undefined;
+  return { received: delivered, receivingTx: s.receivingTx };
 }
 
 /**

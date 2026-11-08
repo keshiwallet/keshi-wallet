@@ -205,6 +205,15 @@ export const MAX_TIP = 5n * GWEI;
 export const MAX_BASE_FEE = 150n * GWEI;
 export const MAX_GAS = 900_000n;
 
+/** The delegate behind an EIP-7702 code ("0xef0100" + 20 bytes), or null for anything else. */
+export function delegationOf(code: string): string | null {
+  const c = String(code ?? "").toLowerCase();
+  return /^0xef0100[0-9a-f]{40}$/.test(c) ? "0x" + c.slice(8) : null;
+}
+
+/** keccak256("Transfer(address,address,uint256)"): the event every ERC-20 emits when tokens move. */
+export const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
 export class EthRpc {
   constructor(
     private fetcher: typeof fetch = (...a) => fetch(...a),
@@ -232,6 +241,15 @@ export class EthRpc {
 
   async ethBalance(address: string): Promise<bigint> {
     return BigInt(await this.call("eth_getBalance", [address, "latest"]));
+  }
+  /**
+   * The contract this address delegates to under EIP-7702, or null. Keshi never signs such a
+   * delegation, so one on the wallet's own address means it was set elsewhere with the same
+   * key: whatever that contract allows can then move the address's funds.
+   */
+  async delegation(address: string): Promise<string | null> {
+    const code = String((await this.call("eth_getCode", [address, "latest"])) ?? "0x").toLowerCase();
+    return delegationOf(code);
   }
   /** Current price of gas, in wei. */
   async gasPrice(): Promise<bigint> {
@@ -308,13 +326,31 @@ export class EthRpc {
    * ceilings for other chains: Arbitrum counts gas differently, and BNB Chain
    * reports a zero base fee, so its gas price is used instead.
    */
-  async prepare(from: string, to: string, data: Uint8Array, value = 0n, limits: { maxGas?: bigint; zeroBaseFee?: boolean; minGas?: bigint; maxGasPrice?: bigint; minTip?: bigint; maxTip?: bigint } = {}): Promise<EthTx> {
-    const [publicNonce, gas, tip, block] = await Promise.all([
+  async prepare(from: string, to: string, data: Uint8Array, value = 0n, limits: { maxGas?: bigint; zeroBaseFee?: boolean; minGas?: bigint; maxGasPrice?: bigint; minTip?: bigint; maxTip?: bigint; chainId?: bigint } = {}): Promise<EthTx> {
+    const [publicNonce, gas, tip, block, chainId, code] = await Promise.all([
       this.call("eth_getTransactionCount", [from, "pending"]),
       this.call("eth_estimateGas", [{ from, to, data: "0x" + bytesToHex(data), ...(value > 0n ? { value: hex(value) } : {}) }]),
       this.call("eth_maxPriorityFeePerGas", []).catch(() => "0x3b9aca00"),
       this.call("eth_getBlockByNumber", ["latest", false]),
+      this.call("eth_chainId", []),
+      this.call("eth_getCode", [from, "latest"]).catch(() => {
+        throw new Error("Could not check your Ethereum address for a delegation (EIP-7702). Nothing was sent; try again in a moment.");
+      }),
     ]);
+    // An address that delegates to a contract (EIP-7702, set elsewhere with the same key) is not one Keshi signs for:
+    // whatever that contract allows could move the funds, before or after this transaction. Checked fresh, every time.
+    const delegate = delegationOf(String(code ?? "0x"));
+    if (delegate) throw new Error(`Your Ethereum address delegates to a contract (${delegate.slice(0, 10)}…, EIP-7702), which Keshi never set. Keshi does not sign while it does: remove the delegation with the wallet that set it. Nothing was sent.`);
+    // The server must be on the chain this transaction is for: a server answering for another chain (misconfigured or
+    // hostile) would give a nonce and fees that mean nothing here, and the signed transaction names the chain anyway.
+    const expected = limits.chainId ?? ETH_CHAIN_ID;
+    let actual: bigint;
+    try {
+      actual = BigInt(chainId);
+    } catch {
+      throw new Error("Ethereum server did not say which chain it serves");
+    }
+    if (actual !== expected) throw new Error(`Ethereum server serves chain ${actual}, not ${expected}. Nothing was sent.`);
     // A private swap still waiting has taken a number the public servers cannot see yet.
     let nonce = BigInt(publicNonce);
     const pending = this.urls === RPCS ? privatePending.get(from.toLowerCase()) : undefined;
@@ -405,7 +441,10 @@ export class EthRpc {
       }
       // The answer may have been lost on the way back: if Flashbots has the trade, it is sent.
       if (hash && (await this.knows(hash))) return remember(hash);
-      throw new Error("Flashbots, which keeps your swap away from trading bots, did not answer. Nothing was swapped. Try again in a moment, or turn off private swaps in Settings > Privacy.");
+      // Not seen anywhere: most likely nothing went out, but a lost answer cannot be told from a refusal, so the
+      // number stays reserved for a while and the user is told to wait rather than send again at once.
+      if (hash) remember(hash);
+      throw new Error("Flashbots, which keeps your swap away from trading bots, did not answer. The swap most likely did not go out, but that cannot be confirmed yet: wait a few minutes and check your Ethereum address before trying again, or turn off private swaps in Settings > Privacy.");
     }
     try {
       const answered = String(await this.call("eth_sendRawTransaction", [raw])).toLowerCase();
@@ -425,6 +464,27 @@ export class EthRpc {
   async outcome(hash: string): Promise<boolean | null> {
     const r = await this.call("eth_getTransactionReceipt", [hash]).catch(() => null);
     return r ? BigInt(r.status ?? "0x0") === 1n : null;
+  }
+
+  /**
+   * How much of `token` a mined transaction delivered to `to`, read from the Transfer events in its receipt:
+   * the chain's own account of an arrival, not a server's summary. Null when the transaction is not in a block,
+   * failed, or delivered nothing to that address.
+   */
+  async tokenDelivered(hash: string, token: string, to: string): Promise<bigint | null> {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) return null;
+    const r = await this.call("eth_getTransactionReceipt", [hash]).catch(() => null);
+    if (!r || BigInt(r.status ?? "0x0") !== 1n || !Array.isArray(r.logs)) return null;
+    const topicTo = "0x" + to.toLowerCase().slice(2).padStart(64, "0");
+    let sum = 0n;
+    for (const log of r.logs.slice(0, 1000)) {
+      if (String(log?.address ?? "").toLowerCase() !== token.toLowerCase()) continue;
+      const topics: unknown[] = Array.isArray(log.topics) ? log.topics : [];
+      if (String(topics[0] ?? "").toLowerCase() !== TRANSFER_TOPIC || String(topics[2] ?? "").toLowerCase() !== topicTo) continue;
+      if (!/^0x[0-9a-fA-F]{64}$/.test(String(log.data ?? ""))) continue;
+      sum += BigInt(String(log.data));
+    }
+    return sum > 0n ? sum : null;
   }
 
   /** Whether a transaction is already in a block. */

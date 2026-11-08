@@ -8,10 +8,14 @@ import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 // page (preview): web storage. The unlocked session is kept in memory only,
 // outside the extension, so it is gone as soon as the app is closed.
 //
-// Everything that says something about the user (balances, addresses, history,
-// contacts, connected sites, bridge crossings) is encrypted on disk with a
-// data key that lives inside the password-protected vault. While the wallet is
-// locked that data cannot be read, by Keshi or by anyone copying the files.
+// What says something about the user (balances, addresses, history, contacts,
+// connected sites, bridge crossings: the SEALED list below) is encrypted on disk
+// with a data key that lives inside the password-protected vault. While the
+// wallet is locked that data cannot be read, by Keshi or by anyone copying the
+// files. Not sealed, on purpose: settings, the vault itself, the news cache, and
+// the miner-alert memory (pool, payout address, worker names and rates), which
+// the background alert must read while the wallet is locked. The alerts screen
+// says so before they are turned on.
 const ext: typeof chrome | undefined = typeof chrome !== "undefined" && chrome.storage ? chrome : undefined;
 
 const enc = (v: unknown) =>
@@ -151,7 +155,7 @@ export interface Settings {
 
 /** The pool followed from the Mining tab, and the alert when a worker stops. Stored sealed. */
 export interface MinerWatch {
-  pool: "kryptex" | "herominers";
+  pool: "kryptex" | "herominers" | "peryn" | "pearlhash" | "pearlfortune" | "luckypool";
   address: string;
   alert: boolean;
   /** Minutes without work before the alert. */
@@ -166,17 +170,25 @@ export interface MinerWatch {
  * Written by the Mining screen only; the background writes only "minerAlertState".
  */
 export interface MinerAlert {
-  pool: "kryptex" | "herominers";
+  pool: "kryptex" | "herominers" | "peryn" | "pearlhash" | "pearlfortune" | "luckypool";
   address: string;
   afterMinutes: 5 | 10 | 30;
 }
 /** The background's own memory: workers already announced as stopped, and every worker name seen. */
 export interface MinerAlertState {
   address: string;
+  /** The pool this memory was built from: a switch of pool starts a fresh memory (1.0.5). */
+  pool?: string;
   offline: string[];
   known: string[];
   /** Workers seen without hashrate and without a time of last work: when that was first seen (seconds). */
   idleSince?: Record<string, number>;
+  /** Each worker's usual hashrate and last reading, for the hashrate alert (1.0.5). */
+  rates?: Record<string, { avg: number; n: number; last?: number }>;
+  /** Workers announced as running low, until they are back. */
+  low?: string[];
+  /** Workers seen low once, announced if still low on the next check. */
+  pending?: string[];
 }
 
 /** Keep the unencrypted alert copy in step with the miner the user follows. */
@@ -193,6 +205,15 @@ export interface Site {
   address: string;
   publicKey: string;
   since: number;
+  /** The wallet and network the grant was given on: on another wallet or network the site is not connected (1.0.5). */
+  wallet?: number;
+  network?: Settings["network"];
+}
+
+/** A grant is only good for the wallet and network it was given on; one without them (before 1.0.5) is stale and must be renewed. */
+export function siteGrantFor(site: Site | undefined, settings: Pick<Settings, "wallet" | "network">): Site | undefined {
+  if (!site || site.wallet === undefined || site.network === undefined) return undefined;
+  return site.wallet === settings.wallet && site.network === settings.network ? site : undefined;
 }
 export interface Contact {
   name: string;

@@ -47,7 +47,7 @@ describe("pool answers", () => {
   const kry = (workers: any[], extra: any = {}) => async (url: string) => {
     const j = (o: unknown, ok = true) => ({ ok, status: ok ? 200 : 500, json: async () => o }) as any;
     if (url.includes("/miner/workers/")) return j({ count: workers.length, results: workers });
-    if (url.includes("/miner/balance/")) return j({ total: 1.25, threshold: 1, reached_pct: 100, unconfirmed: 0.25, confirmed: 1 });
+    if (url.includes("/miner/balance/")) return j({ total: 1.25, threshold: 1, reached_pct: 100, unconfirmed: 0.25, confirmed: 1, paid: 42.5 });
     if (url.includes("/pool/info")) return j({ ticker: "PRL", fee: 1, fee_type: "PPLNS", ...extra });
     return j({}, false);
   };
@@ -57,6 +57,8 @@ describe("pool answers", () => {
     expect(s.workers.map((w) => w.online)).toEqual([true, false, true]);
     expect(s.hashrate).toBe(548e12);
     expect(s.unpaid).toBe(125_000_000n);
+    expect(s.paid).toBe(4_250_000_000n);
+    expect(s.hashrate24h).toBeUndefined();
     expect(s.fee).toBe(0.01);
     expect(s.workers[2]!.lastShare).toBe(now / 1000 - 30);
   });
@@ -68,10 +70,14 @@ describe("pool answers", () => {
     expect(s.workers[0]!.online).toBe(true);
   });
   it("reads a HeroMiners stats_address answer", async () => {
-    const f = async () => ({ ok: true, status: 200, json: async () => ({ stats: { hashrate: 100e12, balance: 50_000_000 }, workers: [{ name: "a", hashrate: 100e12, lastShare: now / 1000 - 10 }] }) }) as any;
+    // HeroMiners counts in units of 2^32 hashes: 23283 units ≈ 100 TH/s.
+    const f = async (url: string) => ({ ok: true, status: 200, json: async () => (String(url).includes("stats_address") ? { stats: { hashrate: 23283, hashrate_24h: 20955, balance: 50_000_000, paid: 1_000_000_000 }, workers: [{ name: "a", hashrate: 23283, lastShare: now / 1000 - 10 }] } : { config: { fee: 0.9 } }) }) as any;
     const s = await c.minerState("herominers", ADDR, f, now);
-    expect(s.hashrate).toBe(100e12);
+    expect(s.hashrate).toBeCloseTo(23283 * 4294967296, -6);
+    expect(s.hashrate24h).toBeCloseTo(20955 * 4294967296, -6);
+    expect(s.fee).toBeCloseTo(0.009, 6);
     expect(s.unpaid).toBe(50_000_000n);
+    expect(s.paid).toBe(1_000_000_000n);
     expect(s.workers[0]!.online).toBe(true);
   });
   it("reads the network from the indexer: tip difficulty, measured block time, difficulty a week ago", async () => {
@@ -134,9 +140,11 @@ describe("offline alert", () => {
     expect(c.offlineCheck(st, { offline: [], known: [] }, 5, now).fresh).toEqual(["rig1"]);
     expect(c.offlineCheck(st, { offline: [], known: [] }, 10, now).fresh).toEqual([]);
     expect(c.offlineCheck(st, { offline: ["rig1"], known: ["rig1", "rig2"] }, 5, now).fresh).toEqual([]);
+    // Vanished from the list: the delay applies from the first check that missed it (1.0.5; it was announced at once before).
     const gone = c.offlineCheck({ workers: [w("rig2", 5e14, now - 30)] }, { offline: [], known: ["rig1", "rig2"] }, 10, now);
-    expect(gone.fresh).toEqual(["rig1"]);
+    expect(gone.fresh).toEqual([]);
     expect(gone.total).toBe(2);
+    expect(c.offlineCheck({ workers: [w("rig2", 5e14, now + 590)] }, gone, 10, now + 600).fresh).toEqual(["rig1"]);
     const back = c.offlineCheck(st, { offline: ["rig1"], known: ["rig1", "rig2"] }, 10, now);
     expect(back.offline).toEqual([]); // rig1 sends work again (6 min < 10): cleared, so a later stop is announced again
   });

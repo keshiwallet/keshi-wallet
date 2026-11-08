@@ -1,6 +1,6 @@
-import { local, session, getSettings, setDataKey, type DappRequest, type Site } from "./platform";
+import { local, session, getSettings, setDataKey, type DappRequest, type Site, siteGrantFor } from "./platform";
 import { networkById } from "../core/network";
-import { minerState, offlineCheck } from "../core/pools";
+import { dropCheck, formatHashrate, minerState, offlineCheck } from "../core/pools";
 import type { MinerAlert, MinerAlertState } from "./platform";
 import { formatPrl } from "../core/amount";
 
@@ -70,15 +70,17 @@ async function handle(msg: { id: unknown; method: unknown; params: any; active?:
   if (typeof msg.id !== "string" || msg.id.length > 64 || typeof msg.method !== "string") return { error: "Invalid request" };
   const unlocked = await loadKey();
   const sites = (unlocked && (await local.get<Record<string, Site>>("sites"))) || {};
-  const site = Object.prototype.hasOwnProperty.call(sites, origin) ? sites[origin] : undefined;
+  const settings = await getSettings();
+  // A grant answers only on the wallet and network it was given on: after a switch the site sees nothing until it reconnects.
+  const site = siteGrantFor(Object.prototype.hasOwnProperty.call(sites, origin) ? sites[origin] : undefined, settings);
   switch (msg.method) {
     case "getNetwork":
-      return site ? { result: (await getSettings()).network } : { error: "Connect first" };
+      return site ? { result: settings.network } : { error: "Connect first" };
     case "getAccounts":
       return { result: site ? [site.address] : [] };
     case "disconnect":
       if (!unlocked) return { error: "Keshi is locked. Open it and unlock it first." };
-      delete sites[origin];
+      delete sites[origin]; // whatever wallet it was given on
       await local.set("sites", sites);
       return { result: true };
     case "connect": {
@@ -181,8 +183,10 @@ async function checkMiner(): Promise<void> {
   if (Date.now() - last < 2 * 60_000 - 5_000) return;
   await session.set("miner:checked", Date.now());
   const state = await minerState(m.pool, m.address);
-  const before = await local.get<MinerAlertState>("minerAlertState");
-  const memory = before && before.address === m.address ? before : { address: m.address, offline: [], known: [] };
+  const stored = await local.get<MinerAlertState>("minerAlertState");
+  // The memory belongs to one pool and one address: another pool's worker names must not be reported missing here.
+  const before = stored && stored.address === m.address && (stored.pool ?? m.pool) === m.pool ? stored : undefined;
+  const memory = before ?? { address: m.address, offline: [], known: [] };
   const { offline, fresh, known, total, idleSince } = offlineCheck(state, memory, m.afterMinutes, Date.now() / 1000);
   // Stopped following meanwhile: say nothing and keep nothing.
   if ((await local.get<MinerAlert>("minerAlert"))?.address !== m.address) return;
@@ -194,5 +198,25 @@ async function checkMiner(): Promise<void> {
       message: `No work received for ${m.afterMinutes} min or more. ${Math.max(0, total - offline.length)} of ${total} worker${total === 1 ? "" : "s"} still mining.`,
     });
   }
-  await local.set("minerAlertState", { address: m.address, offline, known, idleSince } satisfies MinerAlertState);
+  // A worker still mining but well under its usual hashrate (a card that dropped out, a throttled rig): said once, until it is back.
+  const drop = dropCheck(state, before?.rates ? { rates: before.rates, low: before.low ?? [], pending: before.pending ?? [] } : undefined, Date.now() / 1000);
+  // One notification however many workers dropped at once (a farm-wide throttle is one event).
+  if (drop.fresh.length === 1) {
+    const d = drop.fresh[0]!;
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: chrome.runtime.getURL("icon/128.png"),
+      title: `${d.name} hashrate dropped`,
+      message: `${formatHashrate(d.now)} now, usually ${formatHashrate(d.usual)}. Still sending work.`,
+    });
+  } else if (drop.fresh.length > 1) {
+    const sum = (k: "now" | "usual") => drop.fresh.reduce((a, d) => a + d[k], 0);
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: chrome.runtime.getURL("icon/128.png"),
+      title: `${drop.fresh.length} workers run under their usual hashrate`,
+      message: `${formatHashrate(sum("now"))} now, usually ${formatHashrate(sum("usual"))} between them. Still sending work.`,
+    });
+  }
+  await local.set("minerAlertState", { address: m.address, pool: m.pool, offline, known, idleSince, rates: drop.rates, low: drop.low, pending: drop.pending } satisfies MinerAlertState);
 }

@@ -98,7 +98,7 @@ describe("Ethereum fee ceilings and swap deadline", () => {
   const rpcWith = (over: Record<string, unknown>) =>
     new c.EthRpc((async (_u: unknown, init: { body: string }) => {
       const q = JSON.parse(init.body);
-      const table: Record<string, unknown> = { eth_getTransactionCount: "0x1", eth_estimateGas: "0x30d40", eth_maxPriorityFeePerGas: "0x3b9aca00", eth_getBlockByNumber: { baseFeePerGas: "0x2540be400" }, ...over };
+      const table: Record<string, unknown> = { eth_chainId: "0x1", eth_getCode: "0x", eth_getTransactionCount: "0x1", eth_estimateGas: "0x30d40", eth_maxPriorityFeePerGas: "0x3b9aca00", eth_getBlockByNumber: { baseFeePerGas: "0x2540be400" }, ...over };
       return new Response(JSON.stringify({ jsonrpc: "2.0", id: q.id, result: table[q.method] }));
     }) as unknown as typeof fetch, ["https://rpc.test"]);
   const me = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";

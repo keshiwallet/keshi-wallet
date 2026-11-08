@@ -2,7 +2,7 @@ import { keccak_256 } from "@noble/hashes/sha3.js";
 import { bytesToHex, concatBytes, hexToBytes } from "@noble/hashes/utils.js";
 import { WPRL_CONTRACT } from "./bridge";
 import { callData, signEthTx, type EthRpc } from "./eth";
-import { ambiguous } from "./amount";
+import { ambiguous, groupThousands } from "./amount";
 
 // Swapping wPRL and USDT on Uniswap v3 (Ethereum mainnet), from the wallet's
 // own Ethereum address. No account anywhere: the swap is a contract call.
@@ -448,7 +448,7 @@ export function smallSwap(valueUsd: number | null, costUsd: number | null): { co
 /** Amount with decimals, for display. */
 export function formatUnits(v: bigint, decimals: number, max = 6): string {
   const s = v.toString().padStart(decimals + 1, "0");
-  const whole = s.slice(0, s.length - decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const whole = groupThousands(s.slice(0, s.length - decimals));
   const frac = decimals ? s.slice(-decimals).slice(0, max).replace(/0+$/, "") : "";
   return frac ? `${whole}.${frac}` : whole;
 }

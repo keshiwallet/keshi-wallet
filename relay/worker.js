@@ -42,11 +42,13 @@ export default {
     for (const [k, v] of url.searchParams) target.searchParams.set(k, v);
     if (url.pathname === "/v1/quote") {
       // Keshi's integrator name and fee are fixed here, so a copied request cannot redirect the fee.
-      // The fee applies to wPRL purchases only, as in the extension; the small ETH-for-fees leg carries none.
+      // The fee applies to the purchase leg only, as in the extension: USDT delivered on Ethereum since 1.0.5
+      // (wPRL directly before it). The small ETH-for-fees leg carries none.
       target.searchParams.set("integrator", env.INTEGRATOR ?? "keshi");
       target.searchParams.delete("fee");
-      const wprl = (url.searchParams.get("toToken") ?? "").toLowerCase() === "0x07696dcab55e62cfef953666b29fe1970518cb00";
-      if (env.FEE && wprl) target.searchParams.set("fee", env.FEE);
+      const to = (url.searchParams.get("toToken") ?? "").toLowerCase();
+      const purchase = to === "0xdac17f958d2ee523a2206206994597c13d831ec7" || to === "0x07696dcab55e62cfef953666b29fe1970518cb00";
+      if (env.FEE && purchase) target.searchParams.set("fee", env.FEE);
     }
     const upstream = await fetch(target.toString(), {
       headers: { accept: "application/json", "x-lifi-api-key": env.LIFI_API_KEY },

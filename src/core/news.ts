@@ -89,6 +89,7 @@ export interface Raw {
 export function parseRss(xml: string, via: Raw["via"], source = ""): Raw[] {
   const out: Raw[] = [];
   for (const m of xml.matchAll(/<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi)) {
+    if (out.length >= 200) break; // no feed carries more stories than that; a hostile one is not read further
     const b = m[1]!;
     const url = articleUrl(tag(b, "link") || tag(b, "guid"));
     const title = decodeText(tag(b, "title"));
@@ -314,12 +315,44 @@ export function storyId(url: string): string {
 
 /* ---------------------------------------------------------------- loading */
 
+/** The most a feed may weigh: the largest real one is well under 1 MB. A feed that keeps streaming is cut off, not parsed. */
+export const FEED_MAX_BYTES = 2 * 1024 * 1024;
+
+export async function readTextCapped(res: Response, max = FEED_MAX_BYTES): Promise<string> {
+  if (Number(res.headers?.get?.("content-length") ?? 0) > max) throw new Error("Feed too large");
+  if (res.body && typeof res.body.getReader === "function") {
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > max) {
+        await reader.cancel().catch(() => {});
+        throw new Error("Feed too large");
+      }
+      chunks.push(value);
+    }
+    const all = new Uint8Array(size);
+    let at = 0;
+    for (const c of chunks) {
+      all.set(c, at);
+      at += c.byteLength;
+    }
+    return new TextDecoder().decode(all);
+  }
+  const text = await res.text();
+  if (text.length > max) throw new Error("Feed too large");
+  return text;
+}
+
 export async function loadNews(fetcher: typeof fetch = (...a) => fetch(...a)): Promise<NewsItem[]> {
   const get = async (url: string) => {
     const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(12_000) : undefined;
     const res = await fetcher(url, { headers: { accept: "application/rss+xml, application/xml, text/xml" }, cache: "no-store", signal });
     if (!res.ok) throw new Error(`News source answered ${res.status}`);
-    return res.text();
+    return readTextCapped(res);
   };
   const results = await Promise.allSettled([
     ...PEARL_QUERIES.map((q) => get(BING + encodeURIComponent(q)).then((x) => parseRss(x, "search"))),

@@ -30,6 +30,8 @@ export interface AddressInfo {
   received: bigint;
   txCount: number;
   txs: RawTx[];
+  /** False when the history was cut at `maxPages`: older transactions exist that `txs` does not hold. */
+  complete: boolean;
 }
 
 export class Indexer {
@@ -85,6 +87,7 @@ export class Indexer {
       received: BigInt(j.totalReceived ?? "0"),
       txCount: (j.txs ?? 0) + (j.unconfirmedTxs ?? 0),
       txs,
+      complete: !withTxs || pages >= (Number(j.totalPages) || 1),
     };
   }
 

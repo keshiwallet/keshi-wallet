@@ -12,10 +12,20 @@ export function parsePrl(text: string): bigint | null {
   return BigInt(whole || "0") * GRAINS + BigInt((frac + "00000000").slice(0, 8));
 }
 
+/** "1234567" → "1,234,567", in one pass whatever the length (a regex lookahead would be quadratic). */
+export function groupThousands(digits: string): string {
+  let out = "";
+  for (let i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 === 0) out += ",";
+    out += digits[i];
+  }
+  return out;
+}
+
 export function formatPrl(grains: bigint, maxDecimals = 8): string {
   const neg = grains < 0n;
   const abs = neg ? -grains : grains;
-  const whole = (abs / GRAINS).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const whole = groupThousands((abs / GRAINS).toString());
   let frac = (abs % GRAINS).toString().padStart(8, "0").slice(0, maxDecimals).replace(/0+$/, "");
   if (frac.length < 2) frac = frac.padEnd(2, "0");
   return `${neg ? "-" : ""}${whole}.${frac}`;

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import QRCode from "qrcode";
 import * as core from "../core";
 import { formatPrl, parsePrl, prlToNumber } from "../core";
-import { local, type MinerWatch, syncMinerAlert, session, getSettings, DEFAULT_SETTINGS, isExtension, type Contact, type DappRequest, type Settings, type Site } from "../ext/platform";
+import { local, type MinerWatch, syncMinerAlert, session, getSettings, DEFAULT_SETTINGS, isExtension, type Contact, type DappRequest, type Settings, type Site, siteGrantFor } from "../ext/platform";
 import * as store from "./store";
 
 type Tab = "wallet" | "swap" | "explore" | "activity" | "mining" | "settings";
@@ -18,7 +18,8 @@ type Sheet =
   | { kind: "asset"; asset: "ETH" | "wPRL" }
   | { kind: "ethsend"; asset: "ETH" | "wPRL" }
   | { kind: "prl" }
-  | { kind: "miner" }
+  | { kind: "miner"; pool?: core.PoolId }
+  | { kind: "connect"; pool: string }
   | { kind: "calc" };
 
 const short = (a: string, n = 8) => (a.length > 2 * n + 3 ? `${a.slice(0, n + 4)}…${a.slice(-n)}` : a);
@@ -64,7 +65,9 @@ function useCopy(): [string | null, (text: string, tag?: string, secret?: boolea
 
 declare const __KESHI_UNLOCK__: string | undefined;
 const UNLOCK_STYLE: "" | "nacre" | "dial" = typeof __KESHI_UNLOCK__ === "string" && (__KESHI_UNLOCK__ === "nacre" || __KESHI_UNLOCK__ === "dial") ? __KESHI_UNLOCK__ : "";
-const KESHI_VERSION = "1.0.4";
+declare const __KESHI_VERSION__: string | undefined;
+// The version the manifest carries, so Settings never lags behind a release.
+const KESHI_VERSION = typeof __KESHI_VERSION__ === "string" && __KESHI_VERSION__ ? __KESHI_VERSION__ : (() => { try { return chrome.runtime.getManifest().version; } catch { return ""; } })();
 const SUPPORT_EMAIL = "contact@keshiwallet.com";
 
 const ICONS: Record<string, string> = {
@@ -205,7 +208,8 @@ export function Mark({ size = 28 }: { size?: number }) {
 /* ------------------------------------------------------------------ App */
 
 export function App() {
-  const [stage, setStage] = useState<"loading" | "welcome" | "locked" | "ready">("loading");
+  const [stage, setStage] = useState<"loading" | "welcome" | "locked" | "ready" | "broken">("loading");
+  const [bootError, setBootError] = useState("");
   // After "Forgot your password?": the device is wiped and Keshi opens on restore.
   const [startOn, setStartOn] = useState<"start" | "restore">("start");
   const [secrets, setSecrets] = useState<core.Secrets | null>(null);
@@ -214,22 +218,29 @@ export function App() {
   // The wallet in use, out of those kept in the vault.
   const current = useMemo(() => (secrets ? core.selectWallet(secrets, settings.wallet ?? 0) : null), [secrets, settings.wallet]);
 
+  const [bootTry, setBootTry] = useState(0);
   useEffect(() => {
     (async () => {
-      const st = await getSettings();
-      setSettings(st);
-      core.setPrivateEthSend(st.privateSend !== false);
-      // Private swaps still waiting, so the next Ethereum transaction gets the right number after Keshi was closed.
-      core.keepPrivatePending(await session.get<string>("privatePending").catch(() => undefined), (j) => void session.set("privatePending", j).catch(() => {}));
-      document.documentElement.dataset.theme = st.theme;
-      if (!(await store.hasWallet())) return setStage("welcome");
-      const s = await store.resume();
-      if (s) {
-        setSecrets(s);
-        setStage("ready");
-      } else setStage("locked");
+      try {
+        const st = await getSettings();
+        setSettings(st);
+        core.setPrivateEthSend(st.privateSend !== false);
+        // Private swaps still waiting, so the next Ethereum transaction gets the right number after Keshi was closed.
+        core.keepPrivatePending(await session.get<string>("privatePending").catch(() => undefined), (j) => void session.set("privatePending", j).catch(() => {}));
+        document.documentElement.dataset.theme = st.theme;
+        if (!(await store.hasWallet())) return setStage("welcome");
+        const s = await store.resume();
+        if (s) {
+          setSecrets(s);
+          setStage("ready");
+        } else setStage("locked");
+      } catch (e) {
+        // Storage that cannot be read is said, with a way to try again, never a blank screen that stays.
+        setBootError(errText(e));
+        setStage("broken");
+      }
     })();
-  }, []);
+  }, [bootTry]);
 
   // A window left open must lock with the rest: when the session ends (timer,
   // "Lock wallet now" in another window), drop the keys held here too.
@@ -262,15 +273,35 @@ export function App() {
     };
   }, [stage]);
 
+  const [settingsError, setSettingsError] = useState("");
   const saveSettings = async (patch: Partial<Settings>) => {
     const next = { ...settings, ...patch };
+    const previous = settings;
     setSettings(next);
+    setSettingsError("");
     core.setPrivateEthSend(next.privateSend !== false);
     document.documentElement.dataset.theme = next.theme;
-    await local.set("settings", next);
+    try {
+      await local.set("settings", next);
+    } catch (e) {
+      // Not saved: the screen goes back to what is really stored, and says so.
+      setSettings(previous);
+      core.setPrivateEthSend(previous.privateSend !== false);
+      document.documentElement.dataset.theme = previous.theme;
+      setSettingsError(`This setting could not be saved (${errText(e)}). It was put back.`);
+    }
   };
 
   if (stage === "loading") return <div className="screen center" />;
+  if (stage === "broken")
+    return (
+      <div className="screen center">
+        <p className="error" role="alert">Keshi could not read its storage: {bootError}</p>
+        <button className="btn primary" onClick={() => { setStage("loading"); setBootTry((t) => t + 1); }}>
+          Try again
+        </button>
+      </div>
+    );
   if (stage === "welcome")
     return (
       <Onboarding
@@ -304,7 +335,19 @@ export function App() {
     setStage("locked");
   };
   if (approveId) return <Approve id={approveId} secrets={current} settings={settings} />;
-  return <Main secrets={current} setSecrets={setSecrets} settings={settings} saveSettings={saveSettings} onLock={onLock} />;
+  return (
+    <>
+      {settingsError && (
+        <p className="error banner" role="alert">
+          {settingsError}{" "}
+          <button className="link" onClick={() => setSettingsError("")}>
+            OK
+          </button>
+        </p>
+      )}
+      <Main secrets={current} setSecrets={setSecrets} settings={settings} saveSettings={saveSettings} onLock={onLock} />
+    </>
+  );
 }
 
 /* ----------------------------------------------------------- Onboarding */
@@ -574,7 +617,7 @@ function Onboarding({ onDone, start = "start" }: { onDone: (s: core.Secrets, fre
         <input type="checkbox" checked={understood} onChange={(e) => setUnderstood(e.target.checked)} />
         <span>I understand Keshi cannot reset this password. Only my recovery phrase can restore the wallet.</span>
       </label>
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <div className="grow" />
       <button className="btn primary" disabled={busy || !understood} onClick={finish}>
         {busy ? "Encrypting…" : restoring ? "Restore wallet" : "Create wallet"}
@@ -624,7 +667,7 @@ function ForgotPassword({ onBack, onErased }: { onBack: () => void; onErased: ()
         <span>Type ERASE to confirm</span>
         <input value={typed} autoComplete="off" spellCheck={false} onChange={(e) => setTyped(e.target.value)} placeholder="ERASE" />
       </label>
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <div className="grow" />
       <button className="btn sell" disabled={busy || !havePhrase || typed.trim() !== "ERASE"} onClick={erase}>
         {busy ? "Erasing…" : "Erase and restore with my phrase"}
@@ -653,9 +696,9 @@ function Unlock({ onDone, onErased }: { onDone: (s: core.Secrets) => void; onEra
     try {
       const s = await store.unlock(pw, code);
       if (UNLOCK_STYLE) {
-        // The pearl opens, then the wallet appears. Short on purpose: the wallet must not feel slow.
+        // The pearl opens, then the wallet appears. Under a second on purpose: the wallet must not feel slow.
         setState("open");
-        setTimeout(() => onDone(s), UNLOCK_STYLE === "dial" ? 1500 : 1300);
+        setTimeout(() => onDone(s), UNLOCK_STYLE === "dial" ? 750 : 700);
       } else onDone(s);
     } catch (e) {
       if (errText(e) === store.CODE_NEEDED) setNeedCode(true);
@@ -695,7 +738,7 @@ function Unlock({ onDone, onErased }: { onDone: (s: core.Secrets) => void; onEra
               <input inputMode="numeric" autoComplete="one-time-code" placeholder="000000" maxLength={7} value={code} autoFocus onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && go()} />
             </label>
           )}
-          {error && <p className="error">{error}</p>}
+          {error && <p className="error" role="alert">{error}</p>}
           <button className="btn primary" disabled={busy || !pw || (needCode && code.replace(/\s/g, "").length < 6)} onClick={go}>
             {busy ? "Unlocking…" : "Unlock"}
           </button>
@@ -809,21 +852,30 @@ function Main({ secrets, setSecrets, settings, saveSettings, onLock }: MainProps
   const livePrice = ticker?.last ?? info?.price ?? null;
   const price = settings.network === "mainnet" ? livePrice : null;
 
+  // Which wallet and network the screen is for: an answer that arrives for a previous one is dropped, never shown
+  // under the new name (second review, November 2026).
+  const gen = useRef(0);
   const reload = useCallback(async () => {
+    const g = gen.current;
     setLoading(true);
     setError("");
     try {
-      setSnap(await store.refresh(secrets, net));
+      const fresh = await store.refresh(secrets, net);
+      if (g !== gen.current) return;
+      setSnap(fresh);
     } catch (e) {
+      if (g !== gen.current) return;
       setError(e instanceof store.IndexerBehind ? e.message : "Could not reach the Pearl network. Showing the last known balance.");
     } finally {
-      setLoading(false);
+      if (g === gen.current) setLoading(false);
     }
   }, [secrets, net.id]);
 
   useEffect(() => {
+    gen.current += 1;
+    const g = gen.current;
     setSnap(null);
-    store.loadCached(secrets, net).then((c) => c && setSnap((s) => s ?? c));
+    store.loadCached(secrets, net).then((c) => c && g === gen.current && setSnap((s) => s ?? c));
     reload();
     const id = setInterval(reload, 60_000);
     return () => clearInterval(id);
@@ -839,8 +891,9 @@ function Main({ secrets, setSecrets, settings, saveSettings, onLock }: MainProps
   if (sheet?.kind === "ethtx") return <EthTxDetail {...ctx} tx={sheet.tx} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "asset") return <EthAsset {...ctx} asset={sheet.asset} open={setSheet} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "prl") return <PrlAsset {...ctx} open={setSheet} onClose={() => setSheet(null)} />;
-  if (sheet?.kind === "miner") return <MinerSheet {...ctx} onClose={() => setSheet(null)} />;
+  if (sheet?.kind === "miner") return <MinerSheet {...ctx} preset={sheet.pool} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "calc") return <CalcSheet {...ctx} onClose={() => setSheet(null)} />;
+  if (sheet?.kind === "connect") return <ConnectSheet {...ctx} pool={sheet.pool} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "ethsend") return <EthSend {...ctx} asset={sheet.asset} onClose={() => setSheet({ kind: "asset", asset: sheet.asset })} />;
   if (sheet?.kind === "tokens")
     return (
@@ -922,21 +975,26 @@ function Home({ snap, secrets, net, price, loading, error, open, settings, reloa
     setHold(null);
     setExtra([]);
   }, [secrets, net.id]);
-  // A refresh keeps what is on screen until the new figures arrive.
+  // A refresh keeps what is on screen until the new figures arrive; figures for a previous wallet or network are dropped.
   useEffect(() => {
     if (net.id !== "mainnet") return;
-    new core.TokenIndex().tokens().then(setTokens).catch(() => {});
+    let alive = true;
+    new core.TokenIndex().tokens().then((t) => alive && setTokens(t)).catch(() => {});
     store
       .tokenBalances(secrets, net, snap)
-      .then((m) => { setMine(m); setUnread((u) => ({ ...u, tokens: false })); })
-      .catch(() => setUnread((u) => ({ ...u, tokens: true })));
-    if (!settings.ethereum) return;
-    store
-      .ethHoldings(secrets)
-      .then((h) => { setHold(h); setUnread((u) => ({ ...u, eth: false })); })
-      .catch(() => setUnread((u) => ({ ...u, eth: true })));
-    store.ethTokenBalances(secrets).then(setExtra).catch(() => {});
-    ethUsdNow().then((p) => p && setEthUsd(p));
+      .then((m) => { if (!alive) return; setMine(m); setUnread((u) => ({ ...u, tokens: false })); })
+      .catch(() => alive && setUnread((u) => ({ ...u, tokens: true })));
+    if (settings.ethereum) {
+      store
+        .ethHoldings(secrets)
+        .then((h) => { if (!alive) return; setHold(h); setUnread((u) => ({ ...u, eth: false })); })
+        .catch(() => alive && setUnread((u) => ({ ...u, eth: true })));
+      store.ethTokenBalances(secrets).then((x) => alive && setExtra(x)).catch(() => {});
+      ethUsdNow().then((p) => p && alive && setEthUsd(p));
+    }
+    return () => {
+      alive = false;
+    };
   }, [secrets, net.id, snap?.updated, settings.ethereum]);
 
   const rows: Holding[] = [];
@@ -955,7 +1013,10 @@ function Home({ snap, secrets, net, price, loading, error, open, settings, reloa
     else if (x.balance > 0n) rows.push({ key: "e:" + x.meta.address, name: x.meta.symbol, where: "Ethereum token", amount: core.formatUnits(x.balance, x.meta.decimals, 4) });
   }
 
-  const total = rows.reduce((s, r) => s + (r.prl ?? 0), 0);
+  // The headline adds every row that has a price: PRL rows as they are, dollar-priced rows (ETH, WETH) through the PRL
+  // price. Rows without any price (custom tokens, ETH while its price is unknown) are left out and the screen says so.
+  const total = rows.reduce((s, r) => s + (r.prl ?? (r.usd !== undefined && price ? r.usd / price : 0)), 0);
+  const unpriced = rows.filter((r) => r.prl === undefined && (r.usd === undefined || !price) && r.key !== "prl" && !(r.key === "eth" && hold?.eth === 0n)).length;
   const inUsd = settings.unit === "usd" && !!price;
   const prlText = (v: number) => v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: v < 1 ? 6 : 2 });
   const show = (v: number) => (inUsd ? usd(v * price!) : `${prlText(v)} PRL`);
@@ -1003,7 +1064,7 @@ function Home({ snap, secrets, net, price, loading, error, open, settings, reloa
       )}
       <section className="balance">
         <div className="pearl" aria-hidden="true" />
-        <span className="label">Total balance</span>
+        <span className="label">{unpriced > 0 ? `Total balance · ${unpriced} unpriced asset${unpriced === 1 ? "" : "s"} left out` : "Total balance"}</span>
         <button className="figure" onClick={toggleUnit} title={inUsd ? "Show in PRL" : "Show in dollars"} disabled={!price}>
           {!snap ? (
             <span className="whole dim">···</span>
@@ -1435,7 +1496,7 @@ function TxDetail({ tx, flag, net, price, secrets, snap, reload, onClose }: Ctx 
           <button className="link" onClick={() => setFast(null)}>
             Cancel
           </button>
-          {problem && <p className="error">{problem}</p>}
+          {problem && <p className="error" role="alert">{problem}</p>}
         </div>
       ) : null}
       <div className="grow" />
@@ -1694,7 +1755,7 @@ function Send({ snap, secrets, net, price, reload, preset, onClose, settings }: 
             <span>The token index is unreachable. Coins Keshi already knew carry tokens stay aside, but it cannot check newer ones. I received no token coin larger than 0.0005 PRL since the last check.</span>
           </label>
         )}
-        {error && <p className="error">{error}</p>}
+        {error && <p className="error" role="alert">{error}</p>}
         <div className="grow" />
         <button className="btn primary" disabled={state === "sending" || (snap?.protectionChecked === false && !ack)} onClick={confirm}>
           {state === "sending" ? "Sending…" : "Send payment"}
@@ -1786,7 +1847,7 @@ function Send({ snap, secrets, net, price, reload, preset, onClose, settings }: 
           Keshi fee: {service.label} of the amount, never more than {formatPrl(service.cap)} PRL. You see the exact figure before you confirm.
         </p>
       )}
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <div className="grow" />
       <button className="btn primary" disabled={!to || (!max && !amount)} onClick={prepare}>
         Review
@@ -1983,6 +2044,17 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
     store.ethHoldings(secrets).then((h) => { setHold(h); setHoldFailed(false); }).catch(() => setHoldFailed(true));
   }, [secrets]);
   useEffect(refresh, [refresh]);
+  // An EIP-7702 delegation on this address was never set by Keshi: whatever contract holds it can move the funds here.
+  const [delegate, setDelegate] = useState<string | null>(null);
+  useEffect(() => {
+    setDelegate(null);
+    if (net.id !== "mainnet") return;
+    let alive = true;
+    new core.EthRpc().delegation(core.ethAccountOf(secrets).address).then((d) => alive && setDelegate(d)).catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [secrets, net.id, hold?.eth]);
   // The first reading of the Ethereum address picks the direction that makes sense:
   // ETH but no wPRL -> ETH to wPRL. After that the user is in charge.
   const aimed = useRef(false);
@@ -2019,6 +2091,14 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
   const get = dir === "buy" ? meta : WPRL_META;
   const giveBal = dir === "buy" ? (hold?.wprl ?? null) : metaBal;
 
+  // A quote belongs to one direction, amount and wallet: one that comes back after any of them changed is dropped,
+  // and the route is checked again against the form before anything is signed (second review, November 2026).
+  const asked = useRef(0);
+  useEffect(() => {
+    asked.current += 1;
+    setRoute(null);
+  }, [dir, amount, secrets]);
+  const routeFits = (r: core.Route | null) => !!r && !!give && !!get && r.tokens[0]?.toLowerCase() === give.address.toLowerCase() && r.tokens[r.tokens.length - 1]?.toLowerCase() === get.address.toLowerCase() && r.amountIn === core.parseUnits(amount, give.decimals);
   const price = async () => {
     if (!give || !get) return;
     setError("");
@@ -2031,18 +2111,25 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
       const room = hold.eth > reserve ? hold.eth - reserve : 0n;
       if (value > room) return setError(`Keep about ${reserveText} for the Ethereum fee. You can swap up to ${core.formatEth(room, 5)} ETH.`);
     }
+    const my = asked.current;
     setBusy(true);
     try {
-      setRoute(await core.findRoute(new core.EthRpc(), give.address, get.address, value));
+      const r = await core.findRoute(new core.EthRpc(), give.address, get.address, value);
+      if (my !== asked.current) return;
+      setRoute(r);
     } catch (e) {
-      setError(errText(e));
+      if (my === asked.current) setError(errText(e));
     } finally {
-      setBusy(false);
+      if (my === asked.current) setBusy(false);
     }
   };
 
   const go = async () => {
     if (!route || !give || !get || !meta) return;
+    if (!routeFits(route)) {
+      setRoute(null);
+      return setError("The amount or direction changed since this price was read. Read the price again.");
+    }
     setBusy(true);
     setError("");
     try {
@@ -2081,6 +2168,11 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
       </header>
       <p className="muted small">Swap wPRL and ETH, in both directions. You send and receive plain ETH: Keshi takes care of WETH for you.</p>
       {!hold && !holdFailed && <p className="muted small">Reading your Ethereum address…</p>}
+      {delegate && (
+        <p className="hint warn">
+          <b>This Ethereum address delegates to a contract</b> ({short(delegate, 6)}). Keshi never sets this: it was signed elsewhere with the same key, and that contract can move anything held here. Do not send ETH, wPRL or USDT to this address. Move what is on it to a new wallet, then stop using this one on Ethereum.
+        </p>
+      )}
       {nothingOnEth && (
         <>
           <div className="card start">
@@ -2202,7 +2294,7 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
               </button>
             </div>
           )}
-          {route && short_ && dir === "sell" && <p className="error">You do not hold that much {give?.symbol}.</p>}
+          {route && short_ && dir === "sell" && <p className="error" role="alert">You do not hold that much {give?.symbol}.</p>}
           {noEthForFee && dir === "buy" && (
             <GetEth
               address={hold!.address}
@@ -2227,7 +2319,7 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
           )}
           {lowEth && !noEthForFee && showEth && <EthAddressCard address={hold!.address} />}
           {step && <p className="muted small">{step}</p>}
-          {error && <p className="error">{error}</p>}
+          {error && <p className="error" role="alert">{error}</p>}
           {done && <p className="ok">{done}</p>}
           {!route ? (
             <button className="btn primary" disabled={busy || !amount || (noEthForFee && dir === "buy")} onClick={price}>
@@ -2244,7 +2336,7 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
           <p className="muted small">Uniswap pool fees and Ethereum network fees are set by those networks, not by Keshi. On a small amount they can be a large share of the swap: check the quote before you confirm. A confirmed swap cannot be reversed.</p>
         </>
       )}
-      {!meta && error && <p className="error">{error}</p>}
+      {!meta && error && <p className="error" role="alert">{error}</p>}
       {net.id === "mainnet" && !nothingOnEth && (
         <button className="btn" onClick={() => open({ kind: "bridge" })}>
           Bridge PRL and wPRL
@@ -2359,7 +2451,7 @@ function Explore() {
           Bearish {items ? <small>{count("bearish")}</small> : null}
         </button>
       </div>
-      {error && !items?.length && <p className="error">{error}</p>}
+      {error && !items?.length && <p className="error" role="alert">{error}</p>}
       {items === null ? (
         <p className="muted">Reading the news…</p>
       ) : shown.length === 0 ? (
@@ -2591,7 +2683,7 @@ function TradeSheet({ side, secrets, setSecrets, net, snap, price, reload, open,
       </label>
       {side === "sell" && wprlHave > 0n && <p className="muted small">You also have {formatPrl(wprlHave)} wPRL on Ethereum. It can be sold on Uniswap without the bridge.</p>}
       {tooMuch && (
-        <p className="error">
+        <p className="error" role="alert">
           You have {formatPrl(prlHave!)} PRL{wprlHave > 0n ? ` and ${formatPrl(wprlHave)} wPRL` : ""}. Enter {formatPrl(sellable!)} or less.
         </p>
       )}
@@ -2715,7 +2807,7 @@ function TradeSheet({ side, secrets, setSecrets, net, snap, price, reload, open,
         </div>
       )}
       {step && <p className="muted small">{step}</p>}
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       {done && <p className="ok">{done}</p>}
       {done && side === "buy" && chosen === "uniswap" && (
         <button className="btn" onClick={() => open({ kind: "bridge" })}>
@@ -2734,7 +2826,7 @@ const tokenPrice = (grains: number) => {
   return prl >= 1 ? prl.toFixed(2) : prl.toFixed(8).replace(/0+$/, "");
 };
 
-const bigCompact = (n: bigint) => (n < 1_000_000_000_000_000n ? compact(Number(n)) : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ","));
+const bigCompact = (n: bigint) => (n < 1_000_000_000_000_000n ? compact(Number(n)) : core.groupThousands(n.toString()));
 
 function Tokens(props: Ctx & { prlUsd: number | null; onClose: () => void }) {
   const { prlUsd, secrets, net, snap, reload, onClose } = props;
@@ -2829,14 +2921,28 @@ function Tokens(props: Ctx & { prlUsd: number | null; onClose: () => void }) {
     }
   };
 
+  // A quote belongs to one token, count and wallet: a change drops it, and one that comes back late is not shown.
+  const asked = useRef(0);
+  const [quotedFor, setQuotedFor] = useState<{ ticker: string; count: number } | null>(null);
+  useEffect(() => {
+    asked.current += 1;
+    setQuote(null);
+    setQuotedFor(null);
+  }, [count, secrets, net.id]);
   const startMint = async (t: core.Token) => {
     if (!snap) return;
     setMintError("");
     setState("quoting");
+    asked.current += 1;
+    const my = asked.current;
     try {
-      setQuote(await store.quoteMint(secrets, net, snap, t, count));
+      const q = await store.quoteMint(secrets, net, snap, t, count);
+      if (my !== asked.current) return;
+      setQuote(q);
+      setQuotedFor({ ticker: t.ticker, count });
       setState("idle");
     } catch (e) {
+      if (my !== asked.current) return;
       setMintError(errText(e));
       setState("idle");
     }
@@ -2844,6 +2950,10 @@ function Tokens(props: Ctx & { prlUsd: number | null; onClose: () => void }) {
 
   const confirmMint = async () => {
     if (!snap || !quote) return;
+    if (!quotedFor || quotedFor.count !== count || quote.count !== count) {
+      setQuote(null);
+      return setMintError("The number to mint changed since the quote. Ask for a new quote.");
+    }
     setState("minting");
     setMintError("");
     try {
@@ -2916,7 +3026,7 @@ function Tokens(props: Ctx & { prlUsd: number | null; onClose: () => void }) {
         <p className="muted small">
           A mint only counts if supply is left when it confirms. If the token sells out first, the fees are spent and no tokens are credited. This cannot be undone.
         </p>
-        {mintError && <p className="error">{mintError}</p>}
+        {mintError && <p className="error" role="alert">{mintError}</p>}
         <div className="grow" />
         <button className="btn primary" disabled={state === "minting"} onClick={confirmMint}>
           {state === "minting" ? "Minting…" : `Mint ${sel.name}`}
@@ -2972,7 +3082,7 @@ function Tokens(props: Ctx & { prlUsd: number | null; onClose: () => void }) {
                 ))}
               </div>
             </div>
-            {mintError && <p className="error">{mintError}</p>}
+            {mintError && <p className="error" role="alert">{mintError}</p>}
             <button className="btn primary" disabled={!snap || state === "quoting" || !!pending} onClick={() => startMint(sel)}>
               {state === "quoting" ? "Calculating…" : `Mint ${compact(sel.perMint * Math.min(count, maxCount))} ${sel.name}`}
             </button>
@@ -3064,7 +3174,7 @@ function Tokens(props: Ctx & { prlUsd: number | null; onClose: () => void }) {
           {pending && (
             <div className="card">
               <p>A mint is paid for but not published yet: {pending.label}.</p>
-              {mintError && <p className="error">{mintError}</p>}
+              {mintError && <p className="error" role="alert">{mintError}</p>}
               <button className="btn primary" onClick={publish}>
                 Publish
               </button>
@@ -3129,7 +3239,7 @@ function Tokens(props: Ctx & { prlUsd: number | null; onClose: () => void }) {
             </>
           )}
           {(held.length > 0 || (held2 && held2.length > 0)) && <h3>All tokens</h3>}
-          {error && <p className="error">{error}</p>}
+          {error && <p className="error" role="alert">{error}</p>}
           {!list && !error && <Skeleton />}
           {list && list.length === 0 && <p className="muted pad">No token has been issued on Pearl yet.</p>}
           {list && (
@@ -3231,10 +3341,23 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
       throw new Error("Could not read the bridge's limits from Ethereum. Nothing was sent; try again in a moment.");
     });
 
+  // A check belongs to one direction, amount, destination and wallet: one that comes back after any of them changed is
+  // dropped, and the figures are read again from the bridge right before going on (second review, November 2026).
+  const asked = useRef(0);
+  const [checked, setChecked] = useState<{ dir: "out" | "back"; amount: string; eth: string } | null>(null);
+  useEffect(() => {
+    asked.current += 1;
+    setQuote(null);
+    setBackQuote(null);
+    setChecked(null);
+  }, [dir, amount, eth, secrets]);
+  const stillSame = () => !!checked && checked.dir === dir && checked.amount === amount && checked.eth === eth.trim();
   const check = async () => {
     reset();
     const value = parsePrl(amount);
     if (value === null || value <= 0n) return setError("Enter an amount, for example 100");
+    const my = asked.current;
+    const form = { dir, amount, eth: eth.trim() };
     setBusy(true);
     try {
       if (dir === "out") {
@@ -3259,7 +3382,9 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
         if (!q.withinDailyCap) throw new Error("This amount is above what the bridge accepts today. Try a smaller amount.");
         if (q.amount !== value || q.fee < 0n || q.net !== q.amount - q.fee || q.net <= 0n) throw new Error("The bridge answered with figures that do not add up. Nothing was sent.");
         core.checkBridgeBounds(q.amount, q.net, await bridgeBounds(), formatPrl);
+        if (my !== asked.current) return;
         setQuote(q);
+        setChecked(form);
       } else {
         if (hold && value > hold.wprl) throw new Error(`You have ${formatPrl(hold.wprl)} wPRL on your Ethereum address. Enter ${formatPrl(hold.wprl)} or less.`);
         const q = await new core.Bridge().quoteBack(value, mine);
@@ -3267,20 +3392,36 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
         if (!q.withinDailyCap) throw new Error("This amount is above what the bridge accepts today. Try a smaller amount.");
         if (q.amount !== value || q.fee < 0n || q.net !== q.amount - q.fee || q.net <= 0n) throw new Error("The bridge answered with figures that do not add up. Nothing was sent.");
         core.checkBridgeBounds(q.amount, q.net, await bridgeBounds(), formatPrl);
+        if (my !== asked.current) return;
         setBackQuote(q);
+        setChecked(form);
       }
     } catch (e) {
-      setError(errText(e));
+      if (my === asked.current) setError(errText(e));
     } finally {
-      setBusy(false);
+      if (my === asked.current) setBusy(false);
     }
+  };
+
+  /** The bridge's answer, read again right now: paused, over the cap or with other figures than at the check, nothing goes on. */
+  const recheck = async (q: { amount: bigint; fee: bigint; net: bigint }, back: boolean) => {
+    const fresh = back ? await new core.Bridge().quoteBack(q.amount, mine) : await new core.Bridge().quote(q.amount);
+    if (fresh.paused) throw new Error("The bridge is paused right now. Nothing was sent; try again later.");
+    if (!fresh.withinDailyCap) throw new Error("This amount is above what the bridge accepts today. Nothing was sent; try a smaller amount.");
+    if (fresh.amount !== q.amount || fresh.fee !== q.fee || fresh.net !== q.net) throw new Error("The bridge's figures changed since the check. Nothing was sent; check again.");
+    core.checkBridgeBounds(fresh.amount, fresh.net, await bridgeBounds(), formatPrl);
   };
 
   const goOut = async () => {
     if (!quote) return;
+    if (!stillSame()) {
+      reset();
+      return setError("The amount or address changed since the check. Check again.");
+    }
     setBusy(true);
     setError("");
     try {
+      await recheck(quote, false);
       const address = await store.bridgeDepositAddress(eth.trim(), net);
       open({ kind: "send", to: address, amount: formatPrl(quote.amount).replace(/,/g, ""), title: "Bridge to Ethereum", bridgeTo: eth.trim(), locked: true });
     } catch (e) {
@@ -3291,9 +3432,14 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
 
   const goBack = async () => {
     if (!backQuote) return;
+    if (!stillSame()) {
+      reset();
+      return setError("The amount changed since the check. Check again.");
+    }
     setBusy(true);
     setError("");
     try {
+      await recheck(backQuote, true);
       await store.bridgeBack(secrets, backQuote.amount, mine, setStep);
       setDone(`${formatPrl(backQuote.amount)} wPRL sent to the bridge. ${formatPrl(backQuote.net)} PRL will arrive on your Pearl address once Ethereum confirms it.`);
       setBackQuote(null);
@@ -3416,7 +3562,7 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
         />
       )}
       {step && <p className="muted small">{step}</p>}
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       {done && <p className="ok">{done}</p>}
       {dir === "out" && !quote && (
         <button className="btn primary" disabled={busy || !eth || !amount} onClick={check}>
@@ -3505,6 +3651,23 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
 
 /* --------------------------------------------------------------- Mining */
 
+/**
+ * What a tab showed last time, kept in memory while the popup is open: coming back to the tab shows the last
+ * figures at once and refreshes behind, instead of "reading…" every time. Nothing here outlives the popup.
+ */
+const warm = new Map<string, unknown>();
+function useWarm<T>(key: string, initial: T): [T, (v: T) => void] {
+  const [v, set] = useState<T>(() => (warm.has(key) ? (warm.get(key) as T) : initial));
+  const setBoth = useCallback(
+    (x: T) => {
+      warm.set(key, x);
+      set(x);
+    },
+    [key],
+  );
+  return [v, setBoth];
+}
+
 function Mining({ snap, secrets, net, price, open, settings }: Ctx & { open: (s: Sheet) => void }) {
   const address = useMemo(() => core.accountOf(secrets, net).derive(false, 0).address, [secrets, net.id]);
   const [copied, copy] = useCopy();
@@ -3539,13 +3702,18 @@ function Mining({ snap, secrets, net, price, open, settings }: Ctx & { open: (s:
   const periodLabel = { "7D": "Last 7 days", "30D": "Last 30 days", "90D": "Last 90 days", "1Y": "Last 12 months", All: "All time" }[period];
   const unit = stats ? (stats.days <= 31 ? "day" : stats.days <= 120 ? "week" : "month") : "day";
 
-  const [netState, setNetState] = useState<core.NetworkState | null>(null);
+  const [netState, setNetState] = useWarm<core.NetworkState | null>(`net:${net.id}`, null);
+  const [netError, setNetError] = useState("");
   const [miner, setMiner] = useState<MinerWatch | null | undefined>(undefined);
-  const [minerSt, setMinerSt] = useState<core.MinerState | null>(null);
+  const [minerSt, setMinerSt] = useWarm<core.MinerState | null>(`miner:${net.id}`, null);
   const [minerErr, setMinerErr] = useState("");
   useEffect(() => {
     let alive = true;
-    core.networkState(net).then((n) => alive && setNetState(n)).catch(() => {});
+    setNetError("");
+    core
+      .networkState(net)
+      .then((n) => alive && setNetState(n))
+      .catch(() => alive && setNetError("The Pearl network could not be read right now."));
     local.get<MinerWatch>("miner").then((m) => {
       if (alive) setMiner(m ?? null);
       // A miner followed before the alert had its own copy: give it one.
@@ -3559,7 +3727,10 @@ function Mining({ snap, secrets, net, price, open, settings }: Ctx & { open: (s:
     };
   }, [net.id, snap?.updated]);
   useEffect(() => {
-    if (!miner || net.id === "testnet") return;
+    if (!miner || net.id === "testnet") {
+      if (miner === null) setMinerSt(null); // not following: nothing kept from a previous miner
+      return;
+    }
     let alive = true;
     setMinerErr("");
     core
@@ -3570,6 +3741,33 @@ function Mining({ snap, secrets, net, price, open, settings }: Ctx & { open: (s:
       alive = false;
     };
   }, [miner?.pool, miner?.address, snap?.updated]);
+  // The dot next to each pool that has a public page: asked once each time the tab opens, never more than once a minute.
+  const [poolStatus, setPoolStatusState] = useWarm<Partial<Record<core.PoolStatusKind, core.PoolStatus>>>("pools", {});
+  const poolStatusRef = useRef(poolStatus);
+  const setPoolStatus = (st: core.PoolStatus) => {
+    poolStatusRef.current = { ...poolStatusRef.current, [st.kind]: st };
+    setPoolStatusState(poolStatusRef.current);
+  };
+  useEffect(() => {
+    if (net.id === "testnet") return;
+    let alive = true;
+    const ask = () => {
+      for (const p of core.POOL_GUIDE) {
+        if (!p.status) continue;
+        core.poolStatus(p.status, fetch, netState ?? undefined).then((st) => alive && setPoolStatus(st));
+      }
+    };
+    // The pools are asked once the network is read (their luck needs it); if that read is slow or failed, after a moment anyway, luck left out.
+    const wait = netState ? 0 : 4000;
+    const t = setTimeout(ask, wait);
+    // And again every minute while the tab stays open, whether or not the wallet itself refreshed.
+    const every = setInterval(ask, 60_000);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+      clearInterval(every);
+    };
+  }, [net.id, netState === null]);
   // Only for the payout address of this wallet: another address's hashrate says nothing about what this wallet received.
   const yieldInfo = useMemo(() => (income && netState && minerSt && minerSt.hashrate > 0 && miner?.address === address ? core.realYield(income, minerSt.hashrate, netState, minerSt.fee ?? 0) : null), [income, netState, minerSt, miner?.address, address]);
 
@@ -3595,8 +3793,9 @@ function Mining({ snap, secrets, net, price, open, settings }: Ctx & { open: (s:
           {copied ? "Copied" : "Copy payout address"}
         </button>
       </div>
-      <NetworkCard net={net} netState={netState} />
-      <MinerCard miner={miner} state={minerSt} error={minerErr} open={open} hidden={hidden} testnet={net.id === "testnet"} />
+      <NetworkCard net={net} netState={netState} error={netError} />
+      <MinerCard miner={miner} state={minerSt} error={minerErr} open={open} hidden={hidden} testnet={net.id === "testnet"} mine={address} />
+      <PoolsCard status={poolStatus} following={miner?.pool} open={open} testnet={net.id === "testnet"} hashrate={minerSt?.hashrate} net={netState} hidden={hidden} />
       <div className="row-head">
         <h3>Earnings</h3>
         {stats && stats.allTime > 0n && !hidden && <span className="muted small">All time: {formatPrl(stats.allTime, 2)} PRL</span>}
@@ -3635,11 +3834,19 @@ function Mining({ snap, secrets, net, price, open, settings }: Ctx & { open: (s:
           ))}
         </div>
       )}
+      {snap && snap.historyComplete === false && (
+        <p className="muted small" role="status">
+          {period === "All" ? "Not all time: " : ""}the Pearl network's index gave only the most recent part of this address's history, so older payouts are missing here and in the CSV.
+        </p>
+      )}
+      <p className="muted small">
+        Counted as income: block rewards and every payment that reached your payout address{returns.length > 0 ? `, except those matching your ${returns.length} bridge return${returns.length === 1 ? "" : "s"}` : ""}. A payment from anywhere else to that address counts too.
+      </p>
       {stats && period !== "7D" && (
         <p className="muted small">
           One bar per {unit}.{" "}
           {stats.total > 0n && price && !hidden
-            ? `Worth ${usd(prlToNumber(stats.total) * price)} at today's price${stats.thenUsd !== undefined ? `, ${usd(stats.thenUsd)} at the price of each payout` : ""}.`
+            ? `Worth ${usd(prlToNumber(stats.total) * price)} at today's price${stats.thenUsd !== undefined ? `, ${usd(stats.thenUsd)} at the price of each payout${stats.unpriced ? ` (${stats.unpriced} older payout${stats.unpriced === 1 ? "" : "s"} before the price history, not counted there)` : ""}` : ""}.`
             : ""}
         </p>
       )}
@@ -3664,30 +3871,6 @@ function Mining({ snap, secrets, net, price, open, settings }: Ctx & { open: (s:
           Profit calculator
         </button>
       </div>
-      <details className="explain pools">
-        <summary>Pearl mining pools</summary>
-        <p className="muted small">Fees and payout schemes as each pool publishes them (October 2026). Follow your miner from "My miner" when the pool has a public API.</p>
-        <ul className="list plain gpus">
-          {core.POOL_GUIDE.map((p) => (
-            <li key={p.name}>
-              <span className="main">
-                <span>
-                  {p.name}
-                  {p.soon && <small className="muted"> · coming</small>}
-                  {p.id && <small className="muted"> · can be followed</small>}
-                </span>
-                <small>
-                  {p.fee} · {p.scheme}
-                  {p.note ? ` · ${p.note}` : ""}
-                </small>
-              </span>
-              <a className="link" href={p.site} target="_blank" rel="noreferrer">
-                Open
-              </a>
-            </li>
-          ))}
-        </ul>
-      </details>
       {coins >= 20 && (
         <div className="card">
           <p>
@@ -3713,7 +3896,7 @@ function Mining({ snap, secrets, net, price, open, settings }: Ctx & { open: (s:
 }
 
 /** The Pearl network at a glance: price, hashrate, difficulty and block time, read from the wallet's own indexer. */
-function NetworkCard({ net, netState }: { net: core.Network; netState: core.NetworkState | null }) {
+function NetworkCard({ net, netState, error }: { net: core.Network; netState: core.NetworkState | null; error?: string }) {
   const n = netState;
   const trend = n ? core.monthlyGrowth(n) : undefined;
   const weekly = n ? core.weeklyGrowth(n) : undefined;
@@ -3722,7 +3905,7 @@ function NetworkCard({ net, netState }: { net: core.Network; netState: core.Netw
     <>
       <div className="row-head">
         <h3>Pearl network</h3>
-        <span className="muted small">{n ? `${net.id === "testnet" ? "testnet · " : ""}block ${n.height.toLocaleString("en-US")}` : "reading…"}</span>
+        <span className="muted small">{n ? `${net.id === "testnet" ? "testnet · " : ""}block ${n.height.toLocaleString("en-US")}` : error ? "no answer" : "reading…"}</span>
       </div>
       <div className="grid2">
         <div>
@@ -3751,34 +3934,20 @@ function NetworkCard({ net, netState }: { net: core.Network; netState: core.Netw
 }
 
 /** What the followed pool says about this wallet's miner, or an invitation to follow one. */
-function MinerCard({ miner, state, error, open, hidden, testnet }: { miner: MinerWatch | null | undefined; state: core.MinerState | null; error: string; open: (s: Sheet) => void; hidden: boolean; testnet: boolean }) {
-  if (testnet)
-    return (
-      <div className="card">
-        <b>Follow your miner</b>
-        <span className="muted small">Pools pay on Pearl mainnet: switch to mainnet in Settings to follow a miner.</span>
-      </div>
-    );
-  if (miner === undefined) return null;
-  if (!miner)
-    return (
-      <div className="card">
-        <b>Follow your miner</b>
-        <span className="muted small">Hashrate, workers online, and a Chrome notification when one stops. Kryptex and HeroMiners, with your payout address only: no account.</span>
-        <button className="btn" onClick={() => open({ kind: "miner" })}>
-          Connect my pool
-        </button>
-      </div>
-    );
+function MinerCard({ miner, state, error, open, hidden, testnet, mine }: { miner: MinerWatch | null | undefined; state: core.MinerState | null; error: string; open: (s: Sheet) => void; hidden: boolean; testnet: boolean; mine?: string }) {
+  if (testnet || !miner) return null;
   const pool = core.POOLS.find((p) => p.id === miner.pool)!;
+  // The followed miner is one for all wallets: when its payout address is not this wallet's, the card says so.
+  const other = !!mine && miner.address !== mine;
   const offline = state?.workers.filter((w) => !w.online) ?? [];
   const online = state ? state.workers.length - offline.length : 0;
   return (
     <div className="card">
       <div className="row-head tight">
-        <b>My miner</b>
+        <b>{other ? "Watched miner" : "My miner"}</b>
         <span className="muted small">{pool.name}</span>
       </div>
+      {other && <p className="muted small">Pays out to {miner.address.slice(0, 10)}…{miner.address.slice(-6)}, not to this wallet: its figures are not this wallet's income.</p>}
       {error ? (
         <p className="hint warn small">{error}</p>
       ) : (
@@ -3799,7 +3968,9 @@ function MinerCard({ miner, state, error, open, hidden, testnet }: { miner: Mine
           {offline.length > 1 ? ` and ${offline.length - 1} more` : ""} stopped sending work{offline[0]!.lastShare ? ` ${ago(offline[0]!.lastShare)}` : ""}.
         </p>
       )}
+      {state?.hashrate24h !== undefined && state.hashrate24h > 0 && <span className="muted small">24 h average: {core.formatHashrate(state.hashrate24h)}</span>}
       {state?.unpaid !== undefined && state.unpaid > 0n && <span className="muted small">Unpaid at the pool: {hidden ? "••••" : `${formatPrl(state.unpaid, 4)} PRL`}</span>}
+      {state?.paid !== undefined && state.paid > 0n && <span className="muted small">Paid by the pool so far: {hidden ? "••••" : `${formatPrl(state.paid, 4)} PRL`}</span>}
       <button className="btn" onClick={() => open({ kind: "miner" })}>
         Workers and alerts
       </button>
@@ -3808,11 +3979,226 @@ function MinerCard({ miner, state, error, open, hidden, testnet }: { miner: Mine
 }
 
 
+/**
+ * Every Pearl pool in one place, each with its dot, what it costs, and a Follow button when
+ * Keshi can read a miner there.
+ */
+function PoolsCard({ status, following, open, testnet, hashrate, net, hidden }: { status: Partial<Record<core.PoolStatusKind, core.PoolStatus>>; following?: core.PoolId; open: (s: Sheet) => void; testnet: boolean; hashrate?: number; net?: core.NetworkState | null; hidden?: boolean }) {
+  // Every pool in the guide has a public page now, so all are listed alike.
+  const main = core.POOL_GUIDE.filter((p) => p.status);
+  // The fee an estimate uses: the pool's own figure, read from its page just now. The guide's range is never used as a
+  // number: a pool that did not say its fee gets no cost and no PRL/day (second review, November 2026).
+  const feeOf = (_p: core.PoolGuide, st?: core.PoolStatus) => (st?.state === "live" ? st.feeRate : undefined);
+  // What this hashrate would earn per day at each pool, fee taken: only with a hashrate to compare and the network read.
+  const perDay = (p: core.PoolGuide, st?: core.PoolStatus) => {
+    const fee = feeOf(p, st);
+    return hashrate && hashrate > 0 && net && fee !== undefined ? core.expectedPerDay(hashrate, net, fee) : null;
+  };
+  const cost = (p: core.PoolGuide, st?: core.PoolStatus) => {
+    const fee = feeOf(p, st);
+    return st?.state === "live" && fee !== undefined ? core.realCost(fee, p.scheme, st.luck) : null;
+  };
+  const dot = (st: core.PoolStatus | undefined) => (
+    <span
+      className={`live-dot${st?.state === "live" ? "" : " unknown"}`}
+      role="img"
+      aria-label={st?.state === "live" ? "answering" : st?.state === "no-answer" ? "no answer" : st?.state === "coming" ? "not open yet" : "checking"}
+      title={st?.state === "live" ? "The pool answered just now" : st?.state === "no-answer" ? "No answer from the pool's page" : st?.state === "coming" ? "Not open yet" : "Checking…"}
+    />
+  );
+  return (
+    <div className="card">
+      <div className="row-head tight">
+        <b>Pools</b>
+        <span className="muted small">fees as each pool publishes them</span>
+      </div>
+      {!following && !testnet && <span className="muted small">Tap Follow on your pool to see your workers and get a notification when one stops. Only your payout address is sent, no account.</span>}
+      {testnet && <span className="muted small">Pools pay on Pearl mainnet: switch to mainnet in Settings to follow a miner.</span>}
+      <ul className="list plain gpus pools">
+        {main.map((p) => {
+          const st = status[p.status!];
+          const soon = p.soon || st?.state === "coming";
+          return (
+            <li key={p.name}>
+              <span className="main">
+                <span>
+                  {dot(st)}
+                  {p.name}
+                  {soon && <small className="muted"> · coming</small>}
+                </span>
+                <small>
+                  {st?.fee ?? p.fee} · {p.scheme}
+                  {st?.detail ? ` · ${st.detail}` : p.note ? ` · ${p.note}` : ""}
+                </small>
+                {(() => {
+                  const c = cost(p, st);
+                  const d = perDay(p, st);
+                  if (!c && !d) return null;
+                  return (
+                    <small className="pool-figures">
+                      {c ? (
+                        <span title={c.luckPct !== undefined ? `The pool's fee, plus how its luck ran for everyone over the last ${st?.luck ? Math.round(st.luck.hours) : 0} h (${c.luckPct.toFixed(0)}% of the expected blocks found). A past, pool-wide figure, not a charge and not a promise.` : "PPS pays per share: the pool bears the luck, you pay the fee"}>
+                          Cost after luck {c.pct.toFixed(1)}%{c.luckPct !== undefined ? ` (luck ${c.luckPct.toFixed(0)}% over ${st?.luck ? Math.round(st.luck.hours / 24) || 1 : 0} d)` : ""}
+                        </span>
+                      ) : st?.state === "live" && /PPLNS|PROP/i.test(p.scheme) && !/^PPS/i.test(p.scheme) ? (
+                        <span title="No luck figure yet: the pool publishes no blocks, or too few to count">Cost after luck —</span>
+                      ) : null}
+                      {d !== null && d > 0n ? <span>{c || (st?.state === "live" && /PPLNS|PROP/i.test(p.scheme) && !/^PPS/i.test(p.scheme)) ? " · " : ""}≈ {hidden ? "•••" : formatPrl(d, 3)} PRL/day for you</span> : null}
+                    </small>
+                  );
+                })()}
+              </span>
+              {p.id && !testnet && !soon ? (
+                <span className="pool-actions">
+                  <button className="link" onClick={() => open({ kind: "miner", pool: p.id })}>
+                    {following === p.id ? "Following" : "Follow"}
+                  </button>
+                  {core.POOL_CONNECT.some((c) => c.name === p.name) && (
+                    <button className="link" onClick={() => open({ kind: "connect", pool: p.name })}>
+                      Connect
+                    </button>
+                  )}
+                </span>
+              ) : (
+                <a className="link" href={p.site} target="_blank" rel="noreferrer">
+                  Website
+                </a>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      <span className="muted small">
+        Follow: your workers and alerts inside Keshi, for pools with a public miner page. Connect: the pool's addresses and your username, ready to paste into your miner. Green dot: the pool's page answered Keshi just now; grey: no answer, which can be the pool, the network or this computer.
+        {hashrate && hashrate > 0 ? " PRL/day: what your hashrate would earn at each pool on today's network, with the fee the pool reported, luck aside." : ""} Cost after luck: the fee the pool reported, plus how the pool's luck ran for everyone over the last days (PPLNS and PROP pools that publish their blocks); a past figure, not a promise. Shown only for pools that reported their fee just now.
+      </span>
+    </div>
+  );
+}
+
+/** The pool's addresses and the username for this wallet, ready to paste into a miner. Nothing is sent anywhere. */
+/** Servers shown before More: the nearest ones come first in each pool's list. */
+const CONNECT_SERVERS = 4;
+
+function ConnectSheet({ secrets, net, pool, onClose }: Ctx & { pool: string; onClose: () => void }) {
+  const own = useMemo(() => core.accountOf(secrets, net).derive(false, 0).address, [secrets, net.id]);
+  const [worker, setWorker] = useState("rig01");
+  const [copied, copy] = useCopy();
+  // Only what a miner needs to start is shown; the rest (farther servers, the command line, the options) waits behind More.
+  const [more, setMore] = useState(false);
+  const r = core.connectFor(pool, own, worker);
+  // The pool's own page, asked once: a dot for the pool, and one per server when the pool says which are up (Peryn does).
+  const kind = core.POOL_GUIDE.find((p) => p.name === pool)?.status;
+  const [status, setStatus] = useState<core.PoolStatus | null>(null);
+  useEffect(() => {
+    if (!kind || net.id === "testnet") return;
+    let alive = true;
+    core.poolStatus(kind).then((st) => alive && setStatus(st));
+    return () => {
+      alive = false;
+    };
+  }, [kind, net.id]);
+  if (!r)
+    return (
+      <div className="screen">
+        <Header title="Connect" onBack={onClose} />
+        <p className="muted">No connection details for this pool yet.</p>
+      </div>
+    );
+  const c = r.connect;
+  const hasWorker = c.user.includes("WORKER") || c.command.includes("WORKER");
+  return (
+    <div className="screen">
+      <Header title={`Connect to ${c.name}`} onBack={onClose} />
+      <div className="body">
+        {kind && net.id !== "testnet" && (
+          <p className="muted small">
+            <i className={`live-dot${status?.state === "live" ? "" : " unknown"}`} />
+            {status ? (status.state === "live" ? `${c.name} answered Keshi just now` : status.state === "coming" ? `${c.name} is not open for mining yet` : `${c.name} did not answer: the pool, the network or this computer`) : `Asking ${c.name}…`}
+          </p>
+        )}
+        {hasWorker && (
+          <label className="field">
+            <span>Worker name</span>
+            <input value={worker} onChange={(e) => setWorker(e.target.value)} maxLength={32} spellCheck={false} placeholder="rig01" />
+          </label>
+        )}
+        <div className="card tight">
+          <span className="muted small">Username{c.password ? " · password" : ""}</span>
+          <p className="addr left">{r.user}</p>
+          <div className="row gap">
+            <button className="btn" onClick={() => copy(r.user, "user")}>
+              {copied === "user" ? "Copied" : "Copy username"}
+            </button>
+            {c.password && (
+              <button className="btn ghost" onClick={() => copy(c.password!, "pass")} title="Password to put in the miner">
+                {copied === "pass" ? "Copied" : `Password: ${c.password}`}
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="card tight">
+          <span className="muted small">Pool address{c.endpoints.length === 1 ? "" : "es"}</span>
+          <ul className="list plain gpus endpoints">
+            {(more ? c.endpoints : c.endpoints.slice(0, CONNECT_SERVERS)).map((e) => (
+              <li key={e.label + e.port}>
+                <span className="main">
+                  <span>
+                    {status?.servers && Object.prototype.hasOwnProperty.call(status.servers, e.host) && <i className={`live-dot ${status.servers[e.host] ? "" : "off"}`} title={status.servers[e.host] ? "Up, as the pool reports" : "Down, as the pool reports"} />}
+                    {e.label}
+                  </span>
+                  <small>
+                    {e.host}:{e.port}
+                    {e.tlsPort ? (e.tlsPort === e.port ? " · TLS on the same port" : ` · TLS ${e.tlsPort}`) : ""}
+                  </small>
+                </span>
+                <span>
+                  <button className="link" onClick={() => copy(`${e.host}:${e.port}`, `ep-${e.host}:${e.port}`)}>
+                    {copied === `ep-${e.host}:${e.port}` ? "Copied" : "Copy"}
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+          {!more && c.endpoints.length > CONNECT_SERVERS && <span className="muted small">{c.endpoints.length - CONNECT_SERVERS} more servers under More</span>}
+        </div>
+        <div className="row gap">
+          <button className="btn ghost" onClick={() => setMore(!more)}>
+            {more ? "Less" : "More"}
+          </button>
+          <a className="btn ghost" href={c.guide} target="_blank" rel="noreferrer">
+            Setup guide ↗
+          </a>
+        </div>
+        {more && (
+          <>
+            <div className="card tight">
+              <span className="muted small">{c.miner}, one line to start</span>
+              <p className="addr left mono-wrap">{r.command}</p>
+              <button className="btn" onClick={() => copy(r.command, "cmd")}>
+                {copied === "cmd" ? "Copied" : "Copy command"}
+              </button>
+            </div>
+            {c.options && c.options.length > 0 && (
+              <ul className="muted small bullets">
+                {c.options.map((o) => (
+                  <li key={o}>{o}</li>
+                ))}
+              </ul>
+            )}
+            <p className="muted small">Addresses as {c.name}'s site lists them. If one has moved, its guide is the reference.</p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** Choose the pool, see every worker, and turn the offline alert on. */
-function MinerSheet({ snap, secrets, net, onClose }: Ctx & { onClose: () => void }) {
+function MinerSheet({ snap, secrets, net, onClose, preset }: Ctx & { onClose: () => void; preset?: core.PoolId }) {
   const own = useMemo(() => core.accountOf(secrets, net).derive(false, 0).address, [secrets, net.id]);
   const [m, setM] = useState<MinerWatch | null | undefined>(undefined);
-  const [pool, setPool] = useState<core.PoolId>("kryptex");
+  const [pool, setPool] = useState<core.PoolId>(preset ?? "kryptex");
   const [address, setAddress] = useState(own);
   const [state, setState] = useState<core.MinerState | null>(null);
   const [error, setError] = useState("");
@@ -3867,7 +4253,7 @@ function MinerSheet({ snap, secrets, net, onClose }: Ctx & { onClose: () => void
     <div className="screen">
       <Header title="My miner" onBack={onClose} />
       <div className="body">
-        <div className="seg">
+        <div className="seg pools-seg">
           {core.POOLS.map((p) => (
             <button key={p.id} className={(m?.pool ?? pool) === p.id ? "on" : ""} disabled={!!m} onClick={() => setPool(p.id)}>
               {p.name}
@@ -3883,7 +4269,7 @@ function MinerSheet({ snap, secrets, net, onClose }: Ctx & { onClose: () => void
               <input value={address} spellCheck={false} onChange={(e) => setAddress(e.target.value.replace(/\s/g, ""))} />
             </label>
             <p className="muted small">Keshi asks {poolInfo.name} what it reports for this address: hashrate, workers and unpaid balance. Only the address is sent, and the pool already knows it. No account, no key.</p>
-            {error && <p className="error">{error}</p>}
+            {error && <p className="error" role="alert">{error}</p>}
             <button className="btn primary" disabled={busy} onClick={connect}>
               {busy ? "Asking the pool…" : "Follow this miner"}
             </button>
@@ -3893,7 +4279,7 @@ function MinerSheet({ snap, secrets, net, onClose }: Ctx & { onClose: () => void
             <div className="card">
               <span className="muted small">Watching at {poolInfo.name}</span>
               <p className="addr left">{m.address}</p>
-              <a className="link" href={`${poolInfo.site}`} target="_blank" rel="noreferrer">
+              <a className="link" href={core.poolPage(poolInfo, m.address)} target="_blank" rel="noreferrer">
                 Open {poolInfo.name}
               </a>
             </div>
@@ -3907,8 +4293,9 @@ function MinerSheet({ snap, secrets, net, onClose }: Ctx & { onClose: () => void
               <ul className="list plain workers">
                 {[...state.workers]
                   .sort((a, b) => Number(b.online) - Number(a.online) || b.hashrate - a.hashrate)
-                  .map((w) => (
-                    <li key={w.name}>
+                  .slice(0, 1000)
+                  .map((w, i) => (
+                    <li key={`${w.name}#${i}`}>
                       <span className="main">
                         <span>
                           <i className={`live-dot ${w.online ? "" : "off"}`} />
@@ -3921,13 +4308,14 @@ function MinerSheet({ snap, secrets, net, onClose }: Ctx & { onClose: () => void
                   ))}
               </ul>
             )}
+            {state && state.workers.length > 1000 && <p className="muted small">The first 1,000 of {state.workers.length.toLocaleString("en-US")} workers are listed; all of them count above and in the alerts.</p>}
             <div className="card">
               <label className="check">
                 <input type="checkbox" checked={m.alert} onChange={(e) => save({ ...m, alert: e.target.checked })} />
                 <span>
                   <b>Alert me when a worker stops</b>
                   <br />
-                  <em className="muted">A Chrome notification, even with Keshi closed or locked, while Chrome is running. The pool is asked every 2 minutes. To work while locked, the pool and this payout address are kept unencrypted on this device.</em>
+                  <em className="muted">A Chrome notification, even with Keshi closed or locked, while Chrome is running. The pool is asked every 2 minutes. You are also told when a worker still mines but falls well under its usual hashrate (a card dropped out, a rig throttled). To work while locked, the pool, this payout address and what it reads there (worker names and hashrates) are kept unencrypted on this device.</em>
                 </span>
               </label>
               <div className="row-head tight">
@@ -3980,13 +4368,21 @@ function CalcSheet({ snap, net, price, onClose }: Ctx & { onClose: () => void })
       setWatts(String(g.watts));
     }
   };
+  // Every figure typed is bounded: a card cannot do more than 1 EH/s nor draw more than 100 kW, and no price of power is above $100/kWh.
+  // A figure that is not a number, or out of all bounds, gives no estimate rather than a wrong one.
+  const bounded = (v: number, max: number) => (Number.isFinite(v) && v >= 0 && v <= max ? v : null);
+  const numberOrEmpty = (text: string) => (text.trim() === "" ? 0 : Number(text));
   const n = Math.max(1, Math.min(1000, Math.floor(Number(count) || 1)));
-  const h = (core.parseHashrate(hash) ?? 0) * n;
-  const w = (Number(watts) || 0) * n;
-  const kwhUsd = Number(kwh) || 0;
-  const poolFee = Math.max(0, Math.min(50, Number(fee) || 0)) / 100;
+  const h1 = bounded(core.parseHashrate(hash) ?? NaN, 1e18);
+  const w1 = bounded(numberOrEmpty(watts), 100_000);
+  const kwhUsd = bounded(numberOrEmpty(kwh), 100);
+  const feePct = bounded(numberOrEmpty(fee), 50);
+  const invalid = hash.trim() !== "" && h1 === null ? "hashrate" : w1 === null ? "power" : kwhUsd === null ? "electricity price" : feePct === null ? "fee" : null;
+  const h = (h1 ?? 0) * n;
+  const w = (w1 ?? 0) * n;
+  const poolFee = (feePct ?? 0) / 100;
   const growth = netState ? (core.monthlyGrowth(netState) ?? 0) : 0;
-  const est = netState && price && h > 0 ? core.estimate(h, w, kwhUsd, price, netState, poolFee, growth) : null;
+  const est = netState && price && h > 0 && !invalid ? core.estimate(h, w, kwhUsd ?? 0, price, netState, poolFee, growth) : null;
   const saveCosts = () => local.set("calc", { kwh, fee }).catch(() => {});
   return (
     <div className="screen">
@@ -4038,6 +4434,11 @@ function CalcSheet({ snap, net, price, onClose }: Ctx & { onClose: () => void })
         </div>
         {!netState && <p className="muted small">Reading the Pearl network…</p>}
         {netState && !price && <p className="muted small">No PRL price right now: the estimate needs one.</p>}
+        {invalid && (
+          <p className="error" role="alert">
+            The {invalid} is not a number Keshi can use. No estimate until it is.
+          </p>
+        )}
         {est && (
           <dl className="rows">
             <Row k="PRL per day" v={`${formatPrl(est.prlPerDay, 4)} PRL`} />
@@ -4056,10 +4457,10 @@ function CalcSheet({ snap, net, price, onClose }: Ctx & { onClose: () => void })
         {netState && price && (
           <details className="explain">
             <summary>Every card, side by side</summary>
-            <p className="muted small">Net per day for one card at your electricity price ({usd(kwhUsd)}/kWh) and pool fee, on today's network. Reference figures from public benchmarks; "estimate" marks cards without one.</p>
+            <p className="muted small">Net per day for one card at your electricity price ({usd(kwhUsd ?? 0)}/kWh) and pool fee, on today's network. Reference figures from public benchmarks; "estimate" marks cards without one.</p>
             <ul className="list plain gpus">
               {core.GPU_PRESETS.map((g) => {
-                const e = core.estimate(g.hashrate, g.watts, kwhUsd, price, netState, poolFee, growth);
+                const e = core.estimate(g.hashrate, g.watts, kwhUsd ?? 0, price, netState, poolFee, growth);
                 return (
                   <li key={g.name}>
                     <span className="main">
@@ -4126,7 +4527,7 @@ function OldQuantumAddress({ secrets, net }: { secrets: core.Secrets; net: core.
             {state === "looking" ? "Looking…" : "Find a quantum-ready address made with an earlier Keshi"}
           </button>
           {typeof state === "object" && "found" in state && <p className="small muted">None was used with this wallet.</p>}
-          {typeof state === "object" && "error" in state && <p className="error">{state.error}</p>}
+          {typeof state === "object" && "error" in state && <p className="error" role="alert">{state.error}</p>}
         </>
       )}
     </li>
@@ -4156,7 +4557,7 @@ function SettingsTab({ secrets, setSecrets, settings, saveSettings, onLock }: Ct
           <span>Wallet password</span>
           <input type="password" autoFocus value={rmPw} onChange={(e) => setRmPw(e.target.value)} />
         </label>
-        {rmError && <p className="error">{rmError}</p>}
+        {rmError && <p className="error" role="alert">{rmError}</p>}
         <button
           className="btn primary"
           disabled={!rmPw || rmBusy}
@@ -4556,7 +4957,7 @@ function Wallets({ secrets, setSecrets, settings, saveSettings, onClose }: { sec
           <span>Wallet password</span>
           <input type="password" value={pw} autoFocus onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveCreated()} />
         </label>
-        {error && <p className="error">{error}</p>}
+        {error && <p className="error" role="alert">{error}</p>}
         <button className="btn primary" disabled={busy || !pw} onClick={saveCreated}>
           {busy ? "Saving…" : "Save wallet"}
         </button>
@@ -4638,7 +5039,7 @@ function Wallets({ secrets, setSecrets, settings, saveSettings, onClose }: { sec
             <span>Wallet password</span>
             <input type="password" value={pw} autoFocus onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addAccount()} />
           </label>
-          {error && <p className="error">{error}</p>}
+          {error && <p className="error" role="alert">{error}</p>}
           <button className="btn primary" disabled={busy || !pw} onClick={addAccount}>
             {busy ? "Saving…" : `Add account ${nextAccount + 1}`}
           </button>
@@ -4661,7 +5062,7 @@ function Wallets({ secrets, setSecrets, settings, saveSettings, onClose }: { sec
             <span>Wallet password</span>
             <input type="password" value={pw} autoFocus onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && remove()} />
           </label>
-          {error && <p className="error">{error}</p>}
+          {error && <p className="error" role="alert">{error}</p>}
           <button className="btn primary" disabled={busy || !pw} onClick={remove}>
             {busy ? "Removing…" : `Remove ${list[active]!.name}`}
           </button>
@@ -4699,7 +5100,7 @@ function Wallets({ secrets, setSecrets, settings, saveSettings, onClose }: { sec
               <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
             </label>
           )}
-          {error && <p className="error">{error}</p>}
+          {error && <p className="error" role="alert">{error}</p>}
           <button className="btn primary" disabled={busy || (mode !== "new" && (!pw || !text.trim()))} onClick={add}>
             {busy ? (mode === "new" ? "Making…" : "Saving…") : mode === "new" ? "Create wallet" : "Import wallet"}
           </button>
@@ -4752,7 +5153,7 @@ function ShowPhrase({ index, onClose }: { index: number; onClose: () => void }) 
               <input inputMode="numeric" placeholder="000000" maxLength={7} value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && reveal()} />
             </label>
           )}
-          {error && <p className="error">{error}</p>}
+          {error && <p className="error" role="alert">{error}</p>}
           <button className="btn primary" disabled={!pw} onClick={reveal}>
             Show phrase
           </button>
@@ -4832,7 +5233,7 @@ function TwoStep({ secrets, setSecrets, onClose }: { secrets: core.Secrets; setS
         <span>Wallet password</span>
         <input type="password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save()} />
       </label>
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <button className="btn primary" disabled={busy || !pw || code.replace(/\s/g, "").length < 6} onClick={save}>
         {busy ? "Saving…" : on ? "Turn off two-step unlock" : "Turn on two-step unlock"}
       </button>
@@ -4883,7 +5284,7 @@ function Contacts({ net, contacts, onClose }: { net: core.Network; contacts: Con
         <span>Address</span>
         <input value={address} spellCheck={false} placeholder={`${net.hrp}1…`} onChange={(e) => setAddress(e.target.value)} />
       </label>
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <button className="btn" onClick={add}>
         Add contact
       </button>
@@ -4960,14 +5361,15 @@ function Approve({ id, secrets, settings }: { id: string; secrets: core.Secrets;
       if (req.method !== "connect") {
         // Only the wallet the site was connected to may answer it, and only while the site is still connected.
         const sites = (await local.get<Record<string, Site>>("sites")) ?? {};
-        const site = Object.prototype.hasOwnProperty.call(sites, req.origin) ? sites[req.origin] : undefined;
-        if (!site) throw new Error("This site is no longer connected. Close this window.");
+        const site = siteGrantFor(Object.prototype.hasOwnProperty.call(sites, req.origin) ? sites[req.origin] : undefined, await getSettings());
+        if (!site) throw new Error("This site is no longer connected on this wallet and network. Close this window and connect the site again.");
         if (site.address !== me.address) throw new Error("This site is connected to another of your wallets. Switch to that wallet in Keshi, then ask the site again.");
       }
       if (req.method === "connect") {
         const publicKey = Array.from(me.pubkey, (b) => b.toString(16).padStart(2, "0")).join("");
         const sites = (await local.get<Record<string, Site>>("sites")) ?? {};
-        sites[req.origin] = { address: me.address, publicKey, since: Date.now() };
+        const current = await getSettings();
+        sites[req.origin] = { address: me.address, publicKey, since: Date.now(), wallet: current.wallet, network: current.network };
         await local.set("sites", sites);
         await answer({ address: me.address, publicKey });
       } else if (req.method === "signMessage") {
@@ -5046,7 +5448,7 @@ function Approve({ id, secrets, settings }: { id: string; secrets: core.Secrets;
           )}
         </>
       )}
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <div className="grow" />
       <div className="actions">
         <button className="btn" disabled={busy} onClick={() => answer(undefined, "The user rejected the request")}>
@@ -5137,7 +5539,7 @@ function EthAsset({ asset, secrets, price, open, onClose }: Ctx & { asset: EthAs
           ? "ETH lives on your Ethereum address in Keshi. It pays every Ethereum fee: bridging wPRL back to Pearl, swaps and sends."
           : "wPRL is PRL on Ethereum, one for one. Bring it back to Pearl as PRL with the bridge, swap it for ETH, or send it to another Ethereum address."}
       </p>
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <div className="actions">
         <button className="btn primary" disabled={!hold} onClick={() => open({ kind: "ethsend", asset })}>
           Send
@@ -5273,9 +5675,10 @@ function UsdtBuy({ secrets, net, snap, price, open, onClose, settings, saveSetti
         setStatus((m) => ({ ...m, [p.txHash]: s }));
         const outcome = store.purchaseOutcome(s);
         if (outcome) {
-          // What arrived counts only when LI.FI says it is USDT on Ethereum; the swap is capped by what was quoted anyway.
-          const usdtArrived = s.receivedAmount && s.receivedToken?.toLowerCase() === core.ETH_USDT.toLowerCase() && s.receivedChain === 1n;
-          await store.recordPurchase({ ...p, done: true, outcome, ...(usdtArrived ? { received: s.receivedAmount } : {}) });
+          // What arrived counts only once Ethereum itself shows the USDT delivered to this address by the transaction LI.FI names.
+          const arrived = await store.verifiedArrival(s, p.from);
+          if (!alive) return;
+          await store.recordPurchase({ ...p, done: true, outcome, ...(arrived ?? {}) });
           if (alive) setPurchases(await store.usdtPurchases(p.from));
           // What arrived on Ethereum changes the balances, and the amount the Swap button offers.
           if (alive) store.ethHoldings(secrets).then((h) => alive && setHold(h)).catch(() => {});
@@ -5533,7 +5936,7 @@ function UsdtBuy({ secrets, net, snap, price, open, onClose, settings, saveSetti
           </div>
         </>
       )}
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       {sent && (
         <div className="card start">
           <strong>Sent</strong>
@@ -5561,6 +5964,7 @@ function UsdtBuy({ secrets, net, snap, price, open, onClose, settings, saveSetti
                         {finishing === p.txHash ? "Swapping…" : p.swapping ? "Check the swap" : hold && hold.usdt > 0n ? `Swap ${core.formatUnits(store.usdtToSwap(p, hold.usdt), 6, 2)} USDT to wPRL` : "Swap to wPRL"}
                       </button>
                     )}
+                    {p.to === "usdt" && !p.swapped && p.outcome === "arrived" && p.received === undefined && <small>Keshi could not match this arrival to a transfer on Ethereum yet: the amount above is what your address holds, up to the quote.</small>}
                     {p.swapped && (
                       <button className="btn small" onClick={() => open({ kind: "bridge" })}>
                         Bridge wPRL to PRL
@@ -5778,7 +6182,7 @@ function Watched({ net, price, hidden, reloadKey, snap, secrets }: { net: core.N
             <span>Address</span>
             <input value={address} spellCheck={false} placeholder={`${net.hrp}1…`} onChange={(e) => setAddress(e.target.value.replace(/\s/g, ""))} />
           </label>
-          {error && <p className="error">{error}</p>}
+          {error && <p className="error" role="alert">{error}</p>}
           <div className="actions">
             <button className="btn primary" onClick={add}>
               Watch this address
@@ -5932,7 +6336,7 @@ function EthSend({ asset, secrets, price, onClose }: Ctx & { asset: EthAssetName
           <p className="hint">This address is a smart contract, not a simple wallet. Exchanges and smart wallets work this way; make sure it accepts {asset} on Ethereum.</p>
         )}
         <p className="muted small">Ethereum transfers cannot be reversed. Only send to an Ethereum address (0x…): never to a Pearl address, and never to an exchange that does not list {asset}.</p>
-        {error && <p className="error">{error}</p>}
+        {error && <p className="error" role="alert">{error}</p>}
         <div className="grow" />
         <button className="btn primary" disabled={busy} onClick={send}>
           {busy ? "Sending…" : `Send ${asset}`}
@@ -6007,7 +6411,7 @@ function EthSend({ asset, secrets, price, onClose }: Ctx & { asset: EthAssetName
           }
         />
       )}
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <div className="grow" />
       <button className="btn primary" disabled={busy || !to || (!max && !amount)} onClick={prepare}>
         {busy ? "Checking…" : "Review"}
@@ -6218,7 +6622,7 @@ function TokenSend({ token, have, secrets, net, snap, reload, onClose }: Ctx & {
           </ol>
         </div>
         <p className="muted small">Token sends cannot be reversed. Check the address before you confirm.</p>
-        {error && <p className="error">{error}</p>}
+        {error && <p className="error" role="alert">{error}</p>}
         <div className="grow" />
         <button className="btn primary" disabled={busy} onClick={confirm}>
           {busy ? "Sending…" : `Send ${q.name}`}
@@ -6241,7 +6645,7 @@ function TokenSend({ token, have, secrets, net, snap, reload, onClose }: Ctx & {
         </div>
       </label>
       <p className="muted small">PRL-20 amounts are whole numbers. The recipient needs a Pearl address (prl1…); a wallet that understands PRL-20 tokens will show them.</p>
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <div className="grow" />
       <button className="btn primary" disabled={busy || !to || !amount} onClick={review}>
         {busy ? "Calculating…" : "Review"}
@@ -6330,7 +6734,7 @@ function InscriptionSend({ ins, pic, held, secrets, net, snap, reload, onClose }
         <RecipientRisk to={r.plan.to} known={known} />
         {r.together > 1 && <p className="hint warn">This coin holds {r.together} inscriptions. They all go to the recipient together.</p>}
         <p className="muted small">Inscription sends cannot be reversed. Check the address before you confirm.</p>
-        {error && <p className="error">{error}</p>}
+        {error && <p className="error" role="alert">{error}</p>}
         <div className="grow" />
         <button className="btn primary" disabled={busy} onClick={confirm}>
           {busy ? "Sending…" : "Send inscription"}
@@ -6349,7 +6753,7 @@ function InscriptionSend({ ins, pic, held, secrets, net, snap, reload, onClose }
         </div>
       </div>
       <PearlTo value={to} net={net} onChange={(v) => { setError(""); setTo(v); }} />
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
       <div className="grow" />
       <button className="btn primary" disabled={busy || !to} onClick={review}>
         {busy ? "Calculating…" : "Review"}
