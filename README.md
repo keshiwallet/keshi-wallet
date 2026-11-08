@@ -1,4 +1,4 @@
-# Keshi Wallet
+# Keshi Wallet for Pearl
 
 **Pure Pearl. Your keys.**
 
