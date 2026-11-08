@@ -11,7 +11,9 @@ const fail = (why) => {
   console.error(`\nRELEASE STOPPED: ${why}\n`);
   process.exit(1);
 };
-for (const k of ["KESHI_DEV", "KESHI_FEE_ADDRESS", "KESHI_ETH_FEE_ADDRESS"]) if (process.env[k]) fail(`${k} is set. Test settings must never reach users.`);
+// No build option at all may be set for a release: the relay, the LI.FI mode, the unlock screen and the fee addresses
+// are what the code says, never what the environment says. Any KESHI_* variable stops the release (second review, November 2026).
+for (const k of Object.keys(process.env)) if (/^KESHI_/i.test(k)) fail(`${k} is set. A release takes no build option; unset it.`);
 
 const fees = JSON.parse(readFileSync("fees.config.json", "utf8"));
 const base = JSON.parse(readFileSync("static/manifest.base.json", "utf8"));
@@ -23,7 +25,6 @@ if (!/^0x[0-9a-fA-F]{40}$/.test(fees.ethFeeAddress)) fail("fees.config.json has 
 if (!(fees.swapPercent <= 1)) fail("the swap fee is above 1%.");
 if (!((fees.usdtBuyPercent ?? 0) <= 1)) fail("the USDT purchase fee is above 1%.");
 if (fees.lifiApiKey) fail("fees.config.json must not contain the LI.FI key: put it in lifi.key (ignored by git).");
-if (process.env.KESHI_LIFI_DIRECT && !process.env.KESHI_LIFI_KEY && !existsSync("lifi.key")) fail("a direct build needs a LI.FI key (lifi.key or KESHI_LIFI_KEY).");
 for (const k of ["sendPercent", "combinePercent", "bridgePercent"]) if (!((fees[k] ?? 0) <= 3)) fail(`${k} is above 3%.`);
 
 // Nothing is packaged unless the type check and every test pass on this exact code.
@@ -51,6 +52,13 @@ for (const target of ["chrome", "firefox"]) {
   }
   const popup = readFileSync(`${dir}/popup.js`, "utf8");
   if (!popup.includes(fees.feeAddress) || !popup.includes(fees.ethFeeAddress)) fail(`${target}: the fee addresses from fees.config.json are not in the build.`);
+  // The built files must say what a release says: LI.FI through Keshi's relay only, no key inside, no other LI.FI host.
+  if (!manifest.includes("https://lifi.keshiwallet.com/*") || manifest.includes("li.quest")) fail(`${target}: the manifest does not point LI.FI at Keshi's relay.`);
+  if (existsSync("lifi.key")) {
+    const key = readFileSync("lifi.key", "utf8").trim();
+    if (key && popup.includes(key)) fail(`${target}: the LI.FI key is inside the build.`);
+  }
+  if (!popup.includes('"https://lifi.keshiwallet.com"')) fail(`${target}: the build does not point LI.FI at Keshi's relay.`);
 }
 
 rmSync("release", { recursive: true, force: true });

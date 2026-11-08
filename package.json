@@ -1,6 +1,6 @@
 {
   "name": "keshi-wallet",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Keshi: self-custody wallet for Pearl (PRL). Chrome extension.",
   "homepage": "https://keshiwallet.com",
   "author": "Keshi <contact@keshiwallet.com>",
@@ -35,6 +35,7 @@
     "esbuild": "^0.28.2",
     "micro-eth-signer": "^0.20.1",
     "typescript": "^7.0.2",
+    "vite": "^8.3.6",
     "vitest": "^5.0.3"
   }
 }

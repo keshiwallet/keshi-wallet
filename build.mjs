@@ -51,7 +51,7 @@ for (const [name, manifest] of Object.entries(targets)) {
     legalComments: "none",
     loader: { ".woff2": "file", ".woff": "empty" },
     assetNames: "fonts/[name]",
-    define: { "process.env.NODE_ENV": '"production"', __KESHI_FEES__: JSON.stringify(feesForBuild), __KESHI_UNLOCK__: JSON.stringify(process.env.KESHI_UNLOCK ?? "dial"), __KESHI_LIFI_PROXY__: JSON.stringify(LIFI_PROXY), __KESHI_LIFI_KEY__: JSON.stringify(lifiKey) },
+    define: { "process.env.NODE_ENV": '"production"', __KESHI_FEES__: JSON.stringify(feesForBuild), __KESHI_UNLOCK__: JSON.stringify(process.env.KESHI_UNLOCK ?? "dial"), __KESHI_VERSION__: JSON.stringify(base.version), __KESHI_LIFI_PROXY__: JSON.stringify(LIFI_PROXY), __KESHI_LIFI_KEY__: JSON.stringify(lifiKey) },
     logLevel: "warning",
   });
   cpSync("static/popup.html", `${out}/popup.html`);
