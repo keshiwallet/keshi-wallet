@@ -15,7 +15,7 @@ Keshi is a self-custody wallet for Pearl, free on Chrome. No account, no sign-up
 - Keshi is independent. It is not made by Pearl Research Labs, and it is not related to keshi.io, an unrelated project with a similar name.
 - Nobody, not even us, can recover your recovery phrase. Nobody from Keshi will ever ask you for it.
 
-This repository holds the code of the Keshi browser extension, so you can read it and check it. Version in this repository: **1.0.5** (1.0.4 is the version on the Chrome Web Store until 1.0.5 is accepted).
+This repository holds the code of the Keshi browser extension, so you can read it and check it. Version in this repository: **1.0.5**.
 
 ## What it does
 
