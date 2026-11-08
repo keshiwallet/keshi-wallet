@@ -21,11 +21,11 @@ This repository holds the code of the Keshi browser extension, so you can read i
 
 Send, receive, buy, swap, bridge, mint, and track your mining. One wallet, your keys.
 
-- Send and receive PRL, speed up a pending payment, saved addresses
-- Buy and sell PRL: BigONE, SafeTrade and Uniswap prices side by side for your amount, walking each order book (you trade on the exchange's own site)
-- Swap wPRL and ETH on Uniswap
-- Bridge PRL to Ethereum and back with PearlBridge
-- PRL-20 tokens and inscriptions: browse, mint, hold and send
+- Send and receive Pearl, speed up a pending payment, saved addresses
+- Buy and sell Pearl: BigONE, SafeTrade and Uniswap prices side by side for your amount, walking each order book (you trade on the exchange's own site)
+- Swap wPearl and ETH on Uniswap
+- Bridge Pearl to Ethereum and back with PearlBridge
+- Pearl-20 tokens and inscriptions: browse, mint, hold and send
 - Mining rewards tracking, and combining of small payouts
 - Pearl and Ethereum news
 - Several wallets, and several accounts on one recovery phrase; rename or remove them
@@ -37,12 +37,12 @@ Send, receive, buy, swap, bridge, mint, and track your mining. One wallet, your 
 
 | | Keshi fee |
 |---|---|
-| Send and receive PRL | free |
+| Send and receive Pearl | free |
 | Buy Pearl with USDT | 0.5% |
-| Swap wPRL / ETH | 0.3% |
-| Bridge PRL to Ethereum | 0.1% (max 3 PRL), free on the way back |
-| Combine small payouts | 0.1% (max 2 PRL) |
-| Mint a PRL-20 token | 0.05 PRL |
+| Swap wPearl / ETH | 0.3% |
+| Bridge Pearl to Ethereum | 0.1% (max 3 Pearl), free on the way back |
+| Combine small payouts | 0.1% (max 2 Pearl) |
+| Mint a Pearl-20 token | 0.05 Pearl |
 
 Network fees and partners' own fees (PearlBridge, the USDT route) are separate. Every fee is shown in the app before you confirm.
 The addresses that receive Keshi's fees are in [`fees.config.json`](fees.config.json), and in the built extension.
@@ -94,14 +94,14 @@ Keshi has no server of its own. The extension talks directly to these public ser
 | blockbook.pearlresearch.ai (and the testnet one) | Pearl balances, history, broadcasting payments |
 | safe.trade, big.one | Prices and order books (Keshi places no orders there) |
 | api.coingecko.com | Prices and market data |
-| www.pearlscriptions.com | The PRL-20 token index |
-| api.pearlbridge.xyz | Bridge PRL to Ethereum and back |
+| www.pearlscriptions.com | The Pearl-20 token index |
+| api.pearlbridge.xyz | Bridge Pearl to Ethereum and back |
 | ethereum-rpc.publicnode.com, eth.drpc.org, eth.blockscout.com | Ethereum balances, history, swaps and sends |
-| lifi.keshiwallet.com | Keshi's relay to LI.FI for quotes and progress when buying wPRL with USDT from another chain. It only forwards those two read-only requests and holds Keshi's LI.FI key (code in `relay/`) |
+| lifi.keshiwallet.com | Keshi's relay to LI.FI for quotes and progress when buying wPearl with USDT from another chain. It only forwards those two read-only requests and holds Keshi's LI.FI key (code in `relay/`) |
 | arbitrum-one-rpc.publicnode.com, arbitrum.drpc.org, bsc-rpc.publicnode.com, bsc.drpc.org, polygon-bor-rpc.publicnode.com, polygon.drpc.org | Your USDT balance on Arbitrum, BNB Chain and Polygon, and the transaction that sends it |
 | www.bing.com, coindesk.com, cointelegraph.com, theblock.co, decrypt.co, cryptoslate.com, beincrypto.com | The news tab |
 
-Browser permissions: `storage` (your encrypted vault and settings stay on your device), `alarms` (the auto-lock timer and the incoming-payment check), `notifications` ("PRL received").
+Browser permissions: `storage` (your encrypted vault and settings stay on your device), `alarms` (the auto-lock timer and the incoming-payment check), `notifications` ("Pearl received").
 A small script runs on web pages so that Pearl sites can ask Keshi to connect or sign. It holds no keys. Connecting, signing and paying each open Keshi and wait for your click; a site you have connected can read back the address you gave it, until you disconnect it in Settings.
 
 ## Limits worth knowing
@@ -118,7 +118,7 @@ A small script runs on web pages so that Pearl sites can ask Keshi to connect or
 ```js
 const { address } = await window.keshi.connect();
 const { signature } = await window.keshi.signMessage("Sign in"); // BIP-322
-const { txid } = await window.keshi.sendPayment("prl1p…", "12.5");
+const { txid } = await window.keshi.sendPayment("Pearl1p…", "12.5");
 ```
 
 The user always sees the request and decides. Other calls: `disconnect`, `getAccounts`, `getNetwork`.
