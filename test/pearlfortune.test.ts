@@ -80,3 +80,34 @@ describe("Pearl Fortune pool (1.0.5)", () => {
     expect(c.POOL_GUIDE.filter((x) => !x.status).map((x) => x.name)).toEqual([]);
   });
 });
+
+// The worker list of a real farm (221 rigs, first three kept), in the shape /connections answered on 16 November 2026.
+import REAL_CONN from "./fixtures-pearlfortune-connections.json";
+
+describe("Pearl Fortune workers, as the pool really answers (1.0.6)", () => {
+  const AT = Date.parse("2026-11-16T16:07:00.000Z");
+  it("reads each rig's hashrate, last share, connection time, card and miner version", async () => {
+    const s = await c.minerState("pearlfortune", ADDRESS, route({ miner: MINER, "/connections": REAL_CONN }), AT);
+    expect(s.workersKnown).toBe(true);
+    expect(s.workers.map((w) => w.name)).toEqual(["rig-2312", "rig-2313", "rig-2314"]);
+    const w = s.workers[0]!;
+    expect(w.online).toBe(true);
+    expect(Math.round(w.hashrate / 1e12)).toBe(332);
+    expect(Math.round(w.hashrate1h! / 1e12)).toBe(415);
+    expect(Math.round(w.hashrate24h! / 1e12)).toBe(319);
+    expect(w.lastShare).toBe(Math.floor(Date.parse("2026-11-16T16:06:18Z") / 1000));
+    expect(w.since).toBe(Math.floor(Date.parse("2026-11-16T13:51:21Z") / 1000));
+    expect(w.model).toBe("RTX 4090");
+    expect(w.version).toBe("v2.3.7");
+    // No rig of a mining farm is ever shown at zero.
+    expect(s.workers.every((x) => x.hashrate > 100e12 && x.lastShare > 0)).toBe(true);
+  });
+  it("a rig whose only session is stale is offline at zero; a rig with no miner figure shows the pool's 1 h figure", async () => {
+    const data = JSON.parse(JSON.stringify(REAL_CONN.data));
+    data.workers[0].sessions[0].stale = true;
+    delete data.workers[1].sessions[0].reported_hashrate;
+    const s = await c.minerState("pearlfortune", ADDRESS, route({ miner: MINER, "/connections": { data } }), AT);
+    expect([s.workers[0]!.online, s.workers[0]!.hashrate]).toEqual([false, 0]);
+    expect(Math.round(s.workers[1]!.hashrate / 1e12)).toBe(324);
+  });
+});

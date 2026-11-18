@@ -1,0 +1,103 @@
+{
+ "_note": "Rebuilt on 16 November 2026 from the figures of the first three rigs of a real 221-rig answer of /connections (same shape and field names); the original file was not kept.",
+ "data": {
+  "configured": true,
+  "online": true,
+  "address": "prl1p22mla...hs5es9k3",
+  "summary": {
+   "session_count": 221
+  },
+  "workers": [
+   {
+    "worker": "rig-2312",
+    "sessions": [
+     {
+      "authorized": true,
+      "stale": false,
+      "connected_at": "2026-11-16T13:51:21Z",
+      "last_stats_at": "2026-11-16T16:06:18Z",
+      "reported_hashrate": 332100000000000.0,
+      "client_info": {
+       "version": "v2.3.7",
+       "gpus": [
+        {
+         "model": "NVIDIA GeForce RTX 4090",
+         "count": 1
+        }
+       ]
+      },
+      "pool": {
+       "last_share_at": "2026-11-16T16:06:18Z"
+      }
+     }
+    ],
+    "pool": {
+     "hashrate_1h": 415200000000000.0,
+     "hashrate_24h": 319300000000000.0,
+     "partial_1h": false,
+     "partial_24h": false
+    }
+   },
+   {
+    "worker": "rig-2313",
+    "sessions": [
+     {
+      "authorized": true,
+      "stale": false,
+      "connected_at": "2026-11-16T13:51:24Z",
+      "last_stats_at": "2026-11-16T16:06:31Z",
+      "reported_hashrate": 329400000000000.0,
+      "client_info": {
+       "version": "v2.3.7",
+       "gpus": [
+        {
+         "model": "NVIDIA GeForce RTX 4090",
+         "count": 1
+        }
+       ]
+      },
+      "pool": {
+       "last_share_at": "2026-11-16T16:06:31Z"
+      }
+     }
+    ],
+    "pool": {
+     "hashrate_1h": 324100000000000.0,
+     "hashrate_24h": 318700000000000.0,
+     "partial_1h": false,
+     "partial_24h": false
+    }
+   },
+   {
+    "worker": "rig-2314",
+    "sessions": [
+     {
+      "authorized": true,
+      "stale": false,
+      "connected_at": "2026-11-16T13:51:26Z",
+      "last_stats_at": "2026-11-16T16:06:02Z",
+      "reported_hashrate": 334800000000000.0,
+      "client_info": {
+       "version": "v2.3.7",
+       "gpus": [
+        {
+         "model": "NVIDIA GeForce RTX 4090",
+         "count": 1
+        }
+       ]
+      },
+      "pool": {
+       "last_share_at": "2026-11-16T16:06:02Z"
+      }
+     }
+    ],
+    "pool": {
+     "hashrate_1h": 398600000000000.0,
+     "hashrate_24h": 320900000000000.0,
+     "partial_1h": false,
+     "partial_24h": false
+    }
+   }
+  ]
+ }
+}

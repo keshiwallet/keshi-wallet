@@ -15,7 +15,7 @@ Keshi is a self-custody wallet for Pearl, free on Chrome. No account, no sign-up
 - Keshi is independent. It is not made by Pearl Research Labs, and it is not related to keshi.io, an unrelated project with a similar name.
 - Nobody, not even us, can recover your recovery phrase. Nobody from Keshi will ever ask you for it.
 
-This repository holds the code of the Keshi browser extension, so you can read it and check it. Version in this repository: **1.0.5**.
+This repository holds the code of the Keshi browser extension, so you can read it and check it. Version in this repository: **1.0.6**. It is a release candidate: at the time of this commit the Chrome Web Store still carries 1.0.5.
 
 ## What it does
 
@@ -31,7 +31,7 @@ Send, receive, buy, swap, bridge, mint, and track your mining. One wallet, your 
 - Several wallets, and several accounts on one recovery phrase; rename or remove them
 - Encrypted vault, auto-lock, optional authenticator code, look-alike address warnings, testnet mode
 - A website cannot connect, sign or get paid without your click; a site you connected can read the address you gave it
-- No analytics, no ads, no tracking
+- No ads, no tracking. Keshi counts its wallets only for users who answer yes when asked: one anonymous signal a day, no address and no identifier, off by default (see RELEASE-NOTES-1.0.6.md)
 
 ## What Keshi costs
 
@@ -61,13 +61,15 @@ npm run build
 node verify.mjs
 ```
 
-You should see `All 17 files match Keshi 1.0.5.` The list of expected files and their SHA-256 hashes is in [`verify/chrome-1.0.5.sha256`](verify/chrome-1.0.5.sha256). It was made from the package uploaded to the Chrome Web Store, so a match means this code produces the same files as the Store package.
+You should see `All 17 files match Keshi 1.0.6.` The list of expected files and their SHA-256 hashes is in [`verify/chrome-1.0.6.sha256`](verify/chrome-1.0.6.sha256). It was made from the package prepared for the Chrome Web Store, so a match means this code produces the same files as that package. It says nothing about the copy the Store serves or the one installed in a browser: those are checked by comparing the files of the installed extension, as described below. The lists of earlier versions (`verify/chrome-1.0.5.sha256`, the one on the Store today, and others) stay in the same folder.
 
-The package that was uploaded, `keshi-chrome-1.0.5.zip`, is attached to the release of this repository. Its SHA-256 is
+The package prepared for the Store is `keshi-chrome-1.0.6.zip`. Its SHA-256 is
+`62fccfd39d463164affdcc030cf441ffccfd28622d26f279ee0ad6e929526176`.
+The package of 1.0.5, the version on the Store today, is `keshi-chrome-1.0.5.zip`, attached to the v1.0.5 release of the public repository, github.com/keshiwallet/keshi-wallet (not of any private copy of this code); its SHA-256 is
 `7cf616294fcf20ce1a5f6b3681304484ee5ad3a88b6963ef94af243c7eab1787`.
 A zip also records file dates and order, so a zip you build yourself can have another SHA-256 even when every file inside is identical. What matters is the files inside, and `verify.mjs` compares those, one by one, against the Store package.
 
-Every push to this repository is also rebuilt and checked by GitHub itself: see the **Rebuild and verify** action in the Actions tab ([`.github/workflows/verify.yml`](.github/workflows/verify.yml)).
+In the public repository, github.com/keshiwallet/keshi-wallet, every push is also rebuilt and checked by GitHub itself: see the **Rebuild and verify** action in its Actions tab ([`.github/workflows/verify.yml`](.github/workflows/verify.yml)). A private copy of this code has that check only if the `.github` folder was copied with it and Actions are turned on.
 
 **To check the copy Chrome installed on your computer**, find its folder and give it to the script:
 
@@ -77,9 +79,9 @@ node verify.mjs "<folder>"
 
 The extension ID is `mmjkdbdkgikbhbgcmpaaahhjhmdknpnb`. In Chrome the folder is usually:
 
-- Windows: `%LOCALAPPDATA%\Google\Chrome\User Data\Default\Extensions\mmjkdbdkgikbhbgcmpaaahhjhmdknpnb\1.0.5_0`
-- macOS: `~/Library/Application Support/Google/Chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.5_0`
-- Linux: `~/.config/google-chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.5_0`
+- Windows: `%LOCALAPPDATA%\Google\Chrome\User Data\Default\Extensions\mmjkdbdkgikbhbgcmpaaahhjhmdknpnb\1.0.6_0`
+- macOS: `~/Library/Application Support/Google/Chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.6_0`
+- Linux: `~/.config/google-chrome/Default/Extensions/mmjkdbdkgikbhbgcmpaaahhjhmdknpnb/1.0.6_0`
 
 (If you use another Chrome profile or another Chromium browser, the path starts differently.) Chrome adds a `_metadata` folder, which the script ignores, and may add one `update_url` line to `manifest.json`, which the script accepts and says so.
 
@@ -87,7 +89,7 @@ A match shows that the Store package is made from this code. It does not show th
 
 ## What Keshi connects to
 
-Keshi has no server of its own. The extension talks directly to these public services, and its content security policy allows connections to these only (see `host_permissions` and `content_security_policy` in [`static/manifest.base.json`](static/manifest.base.json)):
+Keshi keeps no account and no server that holds your wallet. It runs two small services of its own, both in [`relay/`](relay/): a relay that passes Buy with USDT requests on to LI.FI, and a counter that receives one anonymous signal a day from those who said yes. Everything else goes directly to these public services, and its content security policy allows connections to these only (see `host_permissions` and `content_security_policy` in [`static/manifest.base.json`](static/manifest.base.json)):
 
 | Service | What for |
 |---|---|

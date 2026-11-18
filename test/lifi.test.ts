@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { Transaction as RefTx } from "micro-eth-signer";
 import * as c from "../src/core";
+
+// Routes that swap on the starting chain are refused since 1.0.6; a test that turns them on is always turned back.
+afterEach(() => c.allowSourceSwapsForTests(false));
 
 const ABANDON = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const ARB = c.sourceChain("arbitrum");
@@ -92,6 +95,8 @@ describe("LI.FI quotes", () => {
     expect(() => c.parseQuote(quote({ estimate: est("100000000"), action: { ...quote().action, fromAmount: "100000001" } }), want)).toThrow(/different amount/);
   });
   it("refuses a transaction that moves more than the quote, or nothing", () => {
+    // These checks are kept and exercised; since 1.0.6 a route that passes them all is still refused (next test).
+    c.allowSourceSwapsForTests(true);
     const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000_000n };
     const tx = (min: bigint) => ({ transactionRequest: { ...quote().transactionRequest, data: bridgeCalldata(FROM, 1n, min) } });
     expect(c.parseQuote(quote(tx(99_500_000n)), want).fromAmount).toBe(100_000_000n); // fees taken before bridging: fine
@@ -104,6 +109,8 @@ describe("LI.FI quotes", () => {
     expect(() => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data: viaEth } }), want)).toThrow(/other than your USDT/);
   });
   it("binds the swaps before the bridge to the USDT entered (second audit, November 2026)", () => {
+    // These checks are kept and exercised; since 1.0.6 a route that passes them all is still refused (next test).
+    c.allowSourceSwapsForTests(true);
     const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };
     const q = (data: string) => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data } }), want);
     const d = c.decodeBridgeData(swapCalldata(FROM));
@@ -132,6 +139,18 @@ describe("LI.FI quotes", () => {
     expect(() => c.decodeBridgeData(swapCalldata(FROM, { count: 2n ** 200n }))).toThrow(/could not be read/);
     expect(c.LIFI_SWAP_CALLS.size).toBe(33);
     for (const sel of c.LIFI_SWAP_CALLS) expect(c.LIFI_BRIDGE_CALLS[sel]).toBeGreaterThanOrEqual(64);
+    c.allowSourceSwapsForTests(false);
+  });
+  it("does not sign a route that swaps on the starting chain, however well its swaps check out (external audit, 1.0.6)", () => {
+    c.allowSourceSwapsForTests(false);
+    const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };
+    const q = (data: string) => c.parseQuote(quote({ transactionRequest: { ...quote().transactionRequest, data } }), want);
+    expect(() => q(swapCalldata(FROM))).toThrow(c.SOURCE_SWAP_REFUSED);
+    expect(() => q(swapCalldata(FROM, { swaps: 2 }))).toThrow(c.SOURCE_SWAP_REFUSED);
+    // A route that bridges the USDT itself is still read and accepted.
+    expect(q(bridgeCalldata(FROM)).fromAmount).toBe(100_000_000n);
+    // A swap route that is wrong in itself still says why.
+    expect(() => q(swapCalldata(FROM, { fromAmount: 5_000_000_000n }))).toThrow(/other than the USDT you entered/);
   });
   it("refuses a route that loses too much, a missing dollar value, or a transaction asking for the chain's coin", () => {
     const want = { fromChainId: 42161n, fromToken: ARB.usdt.address, toToken: c.WPRL_CONTRACT, fromAddress: FROM, fromAmount: 100_000000n };

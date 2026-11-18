@@ -27,8 +27,10 @@ const targets = {
   chrome: { ...base, minimum_chrome_version: "111", background: { service_worker: "background.js" } },
   firefox: {
     ...base,
+    // Chrome's display name for a version ("1.0.6b"); Firefox has no such field.
+    version_name: undefined,
     background: { scripts: ["background.js"] },
-    browser_specific_settings: { gecko: { id: "keshi-wallet@keshiwallet.io", strict_min_version: "140.0", data_collection_permissions: { required: ["financialAndPaymentInfo"] } }, gecko_android: { strict_min_version: "142.0" } },
+    browser_specific_settings: { gecko: { id: "keshi-wallet@keshiwallet.io", strict_min_version: "140.0", data_collection_permissions: { required: ["financialAndPaymentInfo"], optional: ["technicalAndInteraction"] } }, gecko_android: { strict_min_version: "142.0" } },
   },
 };
 
@@ -51,7 +53,7 @@ for (const [name, manifest] of Object.entries(targets)) {
     legalComments: "none",
     loader: { ".woff2": "file", ".woff": "empty" },
     assetNames: "fonts/[name]",
-    define: { "process.env.NODE_ENV": '"production"', __KESHI_FEES__: JSON.stringify(feesForBuild), __KESHI_UNLOCK__: JSON.stringify(process.env.KESHI_UNLOCK ?? "dial"), __KESHI_VERSION__: JSON.stringify(base.version), __KESHI_LIFI_PROXY__: JSON.stringify(LIFI_PROXY), __KESHI_LIFI_KEY__: JSON.stringify(lifiKey) },
+    define: { "process.env.NODE_ENV": '"production"', __KESHI_FEES__: JSON.stringify(feesForBuild), __KESHI_UNLOCK__: JSON.stringify(process.env.KESHI_UNLOCK ?? "dial"), __KESHI_VERSION__: JSON.stringify(base.version_name ?? base.version), __KESHI_LIFI_PROXY__: JSON.stringify(LIFI_PROXY), __KESHI_LIFI_KEY__: JSON.stringify(lifiKey) },
     logLevel: "warning",
   });
   cpSync("static/popup.html", `${out}/popup.html`);
