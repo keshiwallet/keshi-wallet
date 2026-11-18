@@ -26,3 +26,6 @@ export * from "./ethsend";
 export * from "./history";
 export * from "./lifi";
 export * from "./pools";
+export * from "./payout";
+export * from "./stats";
+export * from "./official";

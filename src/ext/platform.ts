@@ -24,7 +24,7 @@ const dec = (s: string) =>
   JSON.parse(s, (_k, x) => (x && typeof x === "object" && "$b" in x ? BigInt(x.$b) : x && typeof x === "object" && "$u" in x ? Uint8Array.from(x.$u) : x));
 
 /** Local keys whose values are encrypted at rest. Settings and the vault itself are not in this list. */
-const SEALED = /^(snap:|contacts$|sites$|crossings$|watch$|watched$|miner$|lifi$|ethTokens$|inscriptions:|pendingReveal:|pendingTransfer:|ethLastSend$|pin:|pq:|bridgeEth$|walletNames$|newsRead$|sent:)/;
+const SEALED = /^(snap:|contacts$|sites$|crossings$|watch$|watched$|miner$|lifi$|ethTokens$|inscriptions:|pendingReveal:|pendingTransfer:|ethLastSend$|ethJournal$|pin:|pq:|bridgeEth$|walletNames$|newsRead$|sent:)/;
 let dataKey: Uint8Array | null = null;
 
 /** Give (or take away) the key that unlocks the encrypted local data. */
@@ -160,6 +160,8 @@ export interface MinerWatch {
   alert: boolean;
   /** Minutes without work before the alert. */
   afterMinutes: 5 | 10 | 30;
+  /** Tell when PRL arrives on this address (1.0.6). Off for a miner followed before 1.0.6, until ticked. */
+  payout?: boolean;
   /** Last state seen by the background check, to alert once per outage. Unused since 1.0.4 (see MinerAlert). */
   offline?: string[];
 }
@@ -173,6 +175,10 @@ export interface MinerAlert {
   pool: "kryptex" | "herominers" | "peryn" | "pearlhash" | "pearlfortune" | "luckypool";
   address: string;
   afterMinutes: 5 | 10 | 30;
+  /** False when only the payment alert is on; absent on a copy written before 1.0.6, where it means true. */
+  stops?: boolean;
+  /** The payment alert (1.0.6): when on, Pearl's indexer is asked what this address received. */
+  payout?: boolean;
 }
 /** The background's own memory: workers already announced as stopped, and every worker name seen. */
 export interface MinerAlertState {
@@ -193,11 +199,10 @@ export interface MinerAlertState {
 
 /** Keep the unencrypted alert copy in step with the miner the user follows. */
 export async function syncMinerAlert(m: MinerWatch | null): Promise<void> {
-  if (m && m.alert) await local.set("minerAlert", { pool: m.pool, address: m.address, afterMinutes: m.afterMinutes } satisfies MinerAlert);
-  else {
-    await local.remove("minerAlert");
-    await local.remove("minerAlertState");
-  }
+  if (m && (m.alert || m.payout)) await local.set("minerAlert", { pool: m.pool, address: m.address, afterMinutes: m.afterMinutes, stops: m.alert, payout: !!m.payout } satisfies MinerAlert);
+  else await local.remove("minerAlert");
+  if (!m || !m.alert) await local.remove("minerAlertState");
+  if (!m || !m.payout) await local.remove("minerPayout");
 }
 export const DEFAULT_SETTINGS: Settings = { network: "mainnet", autoLockMinutes: 15, hideBalance: false, quote: "usdt", theme: "system", wallet: 0, unit: "prl", ethereum: true };
 

@@ -183,6 +183,10 @@ export interface EthTx {
   data: Uint8Array;
 }
 
+let sendJournal: ((hash: string, nonce: number | null) => Promise<void>) | null = null;
+/** Lets the wallet keep a lasting record of what it signs: called by `EthRpc.send` before anything goes out. */
+export const setSendJournal = (fn: typeof sendJournal) => void (sendJournal = fn);
+
 /** Sign an EIP-1559 transaction for Ethereum mainnet, or for another EVM chain when `chainId` is given. Returns the raw transaction and its hash. */
 export function signEthTx(tx: EthTx, privateKey: Uint8Array, chainId: bigint = ETH_CHAIN_ID): { raw: string; hash: string } {
   const fields: Rlp[] = [beBytes(chainId), beBytes(tx.nonce), beBytes(tx.maxPriorityFeePerGas), beBytes(tx.maxFeePerGas), beBytes(tx.gasLimit), hexToBytes(tx.to.slice(2)), beBytes(tx.value), tx.data, []];
@@ -415,6 +419,12 @@ export class EthRpc {
    * where bots could trade around it: if Flashbots does not answer, nothing is sent.
    */
   async send(raw: string, hash?: string, swap = false, from?: string): Promise<string> {
+    // Written down before it leaves (1.0.6): the hash and number of every signed transaction, so that one whose
+    // answer is lost on the way back can still be found. A record that cannot be saved does not stop the send.
+    if (hash && sendJournal) {
+      const n = nonceOfRaw(raw);
+      await sendJournal(hash.toLowerCase(), n === null ? null : Number(n)).catch(() => {});
+    }
     if (swap && this.viaPrivate) {
       const remember = (h: string) => {
         const nonce = nonceOfRaw(raw);

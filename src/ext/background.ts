@@ -3,6 +3,9 @@ import { networkById } from "../core/network";
 import { dropCheck, formatHashrate, minerState, offlineCheck } from "../core/pools";
 import type { MinerAlert, MinerAlertState } from "./platform";
 import { formatPrl } from "../core/amount";
+import { sendSignal } from "./stats";
+import { payoutSplit, payoutStep, readingOf, type PayoutMemory } from "../core/payout";
+import { arrivalText, Bridge, readWatch, watchAfter, watchStep, type CrossingStatus } from "../core/bridge";
 
 // Background worker. It signs nothing itself: it routes requests from websites
 // to an approval window, auto-locks, and announces incoming PRL. It reads the
@@ -140,34 +143,128 @@ chrome.alarms.onAlarm.addListener(async () => {
   if (s && s.expires < Date.now()) await session.remove("unlocked");
   // The miner alert works locked too: it needs only the pool and the payout address, kept for it unencrypted.
   await checkMiner().catch(() => {});
-  if (!(await loadKey())) return; // locked: balances and addresses are unreadable, so no payment notification
+  // The bridge's arrival alert (1.0.6b) works locked too: it holds only the transaction numbers of crossings on their way.
+  await checkBridge().catch(() => {});
+  // Only for those who ticked "Count my wallet": one anonymous signal a day. It does nothing otherwise, and never throws.
+  void sendSignal();
+  const unlocked = await loadKey();
+  const watch = unlocked ? await local.get<{ network: string; addresses: string[]; received: bigint }>("watch") : undefined;
+  // The payment alert of the followed miner (1.0.6). When that address is one the wallet already watches, the
+  // notification below tells it apart; otherwise (Keshi locked, or someone else's address) it is asked for here.
+  const mined = await local.get<MinerAlert>("minerAlert");
+  const paid = mined?.payout ? mined.address : undefined;
+  const inWallet = !!paid && !!watch && watch.network === "mainnet" && watch.addresses.slice(0, 25).includes(paid);
+  if (paid && !inWallet) await checkPayout(paid).catch(() => {});
+  if (!unlocked) return; // locked: balances and addresses are unreadable, so no notification for the wallet itself
 
   // Incoming payment notification.
-  const watch = await local.get<{ network: string; addresses: string[]; received: bigint }>("watch");
   if (!watch?.addresses.length) return;
   const net = networkById(watch.network);
   try {
     let total = 0n;
+    let minedReceived: bigint | undefined;
     for (const a of watch.addresses.slice(0, 25)) {
       const r = await fetch(`${net.indexer}/api/v2/address/${a}?details=basic`, { cache: "no-store" });
       if (!r.ok) return;
-      const j = await r.json();
-      total += BigInt(j.totalReceived ?? "0") + (BigInt(j.unconfirmedBalance ?? "0") > 0n ? BigInt(j.unconfirmedBalance) : 0n);
+      // An answer without a well-formed total is no reading: nothing is compared and nothing is remembered this time.
+      const got = readingOf(await r.json());
+      if (got === null) return;
+      if (inWallet && a === paid) minedReceived = got;
+      total += got;
     }
-    if (total > watch.received) {
+    const delta = total > watch.received ? total - watch.received : 0n;
+    // What the payment alert said while Keshi was locked is not said again, and a payment to the mining address is named as one.
+    const memory = paid ? await local.get<PayoutMemory>("minerPayout") : undefined;
+    const split = inWallet && minedReceived !== undefined ? payoutSplit(memory, paid!, minedReceived, delta) : null;
+    const hidden = (await getSettings()).hideBalance;
+    // Remembered first, announced second: a reading that could not be saved is not announced again and again.
+    if (split) await local.set("minerPayout", split.memory);
+    if (total > watch.received) await local.set("watch", { ...watch, received: total });
+    if (split && split.payout > 0n) notifyPayout(paid!, split.payout, !!hidden);
+    const rest = split ? split.rest : delta;
+    if (rest > 0n) {
       chrome.notifications.create({
         type: "basic",
         iconUrl: chrome.runtime.getURL("icon/128.png"),
         title: "PRL received",
         // With the balance hidden in Keshi, the amount stays out of the system's notification centre too.
-        message: (await getSettings()).hideBalance ? "PRL arrived in your wallet." : `+${formatPrl(total - watch.received)} PRL arrived in your wallet.`,
+        message: hidden ? "PRL arrived in your wallet." : `+${formatPrl(rest)} PRL arrived in your wallet.`,
       });
-      await local.set("watch", { ...watch, received: total });
     }
   } catch {
     /* offline: try again on the next tick */
   }
 });
+
+/**
+ * The bridge's arrival alert (1.0.6b). While a crossing is on its way, PearlBridge's public API is asked about it once a
+ * minute, with its transaction number only; the first answer other than "on its way" is announced once and the crossing
+ * is forgotten. Nothing is asked when no crossing is waiting, and a crossing is dropped after three days.
+ */
+let bridgeRound = false;
+async function checkBridge(): Promise<void> {
+  // One round at a time: a round still waiting for the bridge is not joined by a second one.
+  if (bridgeRound) return;
+  bridgeRound = true;
+  try {
+    const stored = await local.get<unknown>("bridgeWatch");
+    if (stored === undefined) return;
+    const list = (await local.get<boolean>("bridgeAlert")) === false ? [] : readWatch(stored, Date.now());
+    if (!list.length) return void (await local.remove("bridgeWatch"));
+    // The size and time limits of an answer are the Bridge's own (64 kB counted while reading, fifteen seconds).
+    const bridge = new Bridge((url, init) => fetch(url, { ...init, cache: "no-store", credentials: "omit", redirect: "error" }));
+    const results: Record<string, CrossingStatus | undefined> = {};
+    for (const w of list) results[w.txid] = await (w.back ? bridge.backStatus(w.txid) : bridge.status(w.txid)).catch(() => undefined);
+    const { ended, held } = watchStep(list, results);
+    if (!ended.length && !held.length) return;
+    // Saved first, announced second: what could not be saved is not announced every minute. The list is read
+    // again: the screen may have added a crossing, or the alert may have been turned off, meanwhile.
+    const off = (await local.get<boolean>("bridgeAlert")) === false;
+    const keep = off ? [] : watchAfter(readWatch(await local.get<unknown>("bridgeWatch"), Date.now()), ended.map((t) => t.watch), held);
+    if (keep.length) await local.set("bridgeWatch", keep);
+    else await local.remove("bridgeWatch");
+    if (off) return;
+    // Best effort from here: a notification the system refuses is not retried.
+    for (const t of [...ended, ...held.map((watch) => ({ watch, phase: "review" as const }))]) {
+      const text = arrivalText(t.watch.back, t.phase);
+      if (text) chrome.notifications.create({ type: "basic", iconUrl: chrome.runtime.getURL("icon/128.png"), title: text.title, message: text.message });
+    }
+  } finally {
+    bridgeRound = false;
+  }
+}
+
+function notifyPayout(address: string, amount: bigint, hidden: boolean): void {
+  const short = `${address.slice(0, 8)}…${address.slice(-4)}`;
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: chrome.runtime.getURL("icon/128.png"),
+    // Named for what is known: PRL arrived on that address. Anyone can send PRL to an address, so it is not called a payment "from your pool".
+    title: "PRL received on your mining address",
+    message: hidden ? `PRL arrived on ${short}.` : `+${formatPrl(amount)} PRL arrived on ${short}.`,
+  });
+}
+
+/**
+ * The payment alert while the wallet's own notification cannot cover the mining address: Pearl's public indexer is
+ * asked what the address received, once a minute. The first reading announces nothing. Only the address is sent.
+ */
+async function checkPayout(address: string): Promise<void> {
+  // The address was checked when the miner was followed; checked again here, since it is read back from storage into a URL.
+  if (!/^prl1[02-9ac-hj-np-z]{6,90}$/.test(address)) return;
+  const r = await fetch(`${networkById("mainnet").indexer}/api/v2/address/${encodeURIComponent(address)}?details=basic`, { cache: "no-store", redirect: "error" });
+  if (!r.ok) return;
+  // An answer without a well-formed total is no reading: what was remembered stays, and nothing is announced.
+  const reading = readingOf(await r.json());
+  if (reading === null) return;
+  const step = payoutStep(await local.get<PayoutMemory>("minerPayout"), address, reading);
+  // Stopped following, or the alert turned off, meanwhile: say nothing and keep nothing.
+  const now = await local.get<MinerAlert>("minerAlert");
+  if (!now?.payout || now.address !== address) return;
+  // Remembered first, announced second: a reading that could not be saved is not announced every minute.
+  await local.set("minerPayout", step.memory);
+  if (step.fresh > 0n) notifyPayout(address, step.fresh, !!(await getSettings()).hideBalance);
+}
 
 /**
  * Every few minutes, ask the followed pool which workers still send work. A
@@ -177,7 +274,7 @@ chrome.alarms.onAlarm.addListener(async () => {
  */
 async function checkMiner(): Promise<void> {
   const m = await local.get<MinerAlert>("minerAlert");
-  if (!m?.address) return;
+  if (!m?.address || m.stops === false) return;
   const last = (await session.get<number>("miner:checked")) ?? 0;
   // Asked about every 2 minutes, so a 5-minute delay is announced within 5 to 7 minutes.
   if (Date.now() - last < 2 * 60_000 - 5_000) return;

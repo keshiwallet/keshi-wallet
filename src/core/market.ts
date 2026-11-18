@@ -58,3 +58,16 @@ export class MarketData {
     return data;
   }
 }
+
+/**
+ * A price curve that ends on the live price: the same series with one more point, now. Left as it is when there
+ * is no live price, or when it is more than 10% away from the curve's last point (two sources that disagree are
+ * not stitched together).
+ */
+export function withLivePrice<T extends { time: number; value: number }>(series: T[] | null, live: number | null | undefined, now = Math.floor(Date.now() / 1000)): T[] | null {
+  if (!series || series.length < 2 || !(typeof live === "number" && Number.isFinite(live) && live > 0)) return series;
+  const last = series[series.length - 1]!;
+  if (!(last.value > 0) || Math.abs(live - last.value) / last.value > 0.1) return series;
+  if (last.value === live) return series;
+  return [...series, { ...last, time: Math.max(now, last.time + 1), value: live }];
+}

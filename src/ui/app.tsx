@@ -3,14 +3,16 @@ import QRCode from "qrcode";
 import * as core from "../core";
 import { formatPrl, parsePrl, prlToNumber } from "../core";
 import { local, type MinerWatch, syncMinerAlert, session, getSettings, DEFAULT_SETTINGS, isExtension, type Contact, type DappRequest, type Settings, type Site, siteGrantFor } from "../ext/platform";
+import { noteWalletCount, sendSignal } from "../ext/stats";
+import { CountingSetting, TermsList } from "./terms";
 import * as store from "./store";
 
 type Tab = "wallet" | "swap" | "explore" | "activity" | "mining" | "settings";
 type Sheet =
   | null
-  | { kind: "send"; to?: string; amount?: string; max?: boolean; title?: string; combine?: boolean; bridgeTo?: string; locked?: boolean }
+  | { kind: "send"; to?: string; amount?: string; max?: boolean; title?: string; combine?: boolean; bridgeTo?: string; locked?: boolean; bridgeNeed?: number; bridgeDelay?: number; bridgeThen?: "sell"; bridgeNet?: bigint }
   | { kind: "bridge"; amount?: string }
-  | { kind: "trade"; side: "buy" | "sell" }
+  | { kind: "trade"; side: "buy" | "sell"; amount?: string; venue?: "uniswap" }
   | { kind: "receive" }
   | { kind: "tx"; tx: core.Activity; flag?: core.Flag }
   | { kind: "ethtx"; tx: core.EthActivity }
@@ -27,6 +29,24 @@ const usd = (n: number) =>
   n > 0 && n < 0.01
     ? "$" + n.toFixed(Math.min(12, 1 - Math.floor(Math.log10(n)))).replace(/0+$/, "")
     : n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: n < 1 ? 4 : 2 });
+/**
+ * Arrow keys, Home and End inside a group of options (role tablist or radiogroup): moves to the next option and
+ * chooses it. Tab then leaves the group, since only the chosen option is in the tab order (see `rove`).
+ */
+const groupKeys = (e: React.KeyboardEvent<HTMLElement>) => {
+  const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+  if (!step && e.key !== "Home" && e.key !== "End") return;
+  const all = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('button[role="tab"], button[role="radio"]')).filter((b) => !b.disabled);
+  if (!all.length) return;
+  const at = all.indexOf(document.activeElement as HTMLButtonElement);
+  const next = e.key === "Home" ? all[0]! : e.key === "End" ? all[all.length - 1]! : all[(Math.max(at, 0) + step + all.length) % all.length]!;
+  e.preventDefault();
+  next.focus();
+  next.click();
+};
+/** Only the chosen option of a group is reached with Tab; the others with the arrow keys. */
+const rove = (chosen: boolean) => (chosen ? 0 : -1);
+
 const when = (t: number) =>
   t ? new Date(t * 1000).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "Pending";
 const compact = (n: number) => new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(n);
@@ -272,6 +292,16 @@ export function App() {
       if (isExtension) chrome.storage.onChanged.removeListener(onChange);
     };
   }, [stage]);
+
+  // For those who ticked "Count my wallet": how many wallets Keshi holds (the number only), and, where no
+  // background runs (the phone app), today's signal. In the extension the background sends it.
+  const walletCount = secrets?.wallets?.length ?? (secrets ? 1 : 0);
+  useEffect(() => {
+    if (stage !== "ready" || !walletCount) return;
+    void noteWalletCount(walletCount).then(() => {
+      if (!isExtension) void sendSignal();
+    });
+  }, [stage, walletCount]);
 
   const [settingsError, setSettingsError] = useState("");
   const saveSettings = async (patch: Partial<Settings>) => {
@@ -885,7 +915,7 @@ function Main({ secrets, setSecrets, settings, saveSettings, onLock }: MainProps
 
   if (sheet?.kind === "send") return <Send {...ctx} preset={sheet} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "receive") return <Receive {...ctx} onClose={() => setSheet(null)} />;
-  if (sheet?.kind === "trade") return <TradeSheet {...ctx} side={sheet.side} setSecrets={setSecrets} open={setSheet} onClose={() => setSheet(null)} />;
+  if (sheet?.kind === "trade") return <TradeSheet {...ctx} side={sheet.side} presetAmount={sheet.amount} presetVenue={sheet.venue} setSecrets={setSecrets} open={setSheet} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "bridge") return <BridgeSheet {...ctx} preset={sheet.amount} open={setSheet} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "tx") return <TxDetail {...ctx} tx={sheet.tx} flag={sheet.flag} onClose={() => setSheet(null)} />;
   if (sheet?.kind === "ethtx") return <EthTxDetail {...ctx} tx={sheet.tx} onClose={() => setSheet(null)} />;
@@ -1119,7 +1149,7 @@ function Home({ snap, secrets, net, price, loading, error, open, settings, reloa
         </button>
       </div>
       {error && <p className="hint">{error}</p>}
-      {net.id === "mainnet" && <PriceCard holding={snap ? prlToNumber(snap.balance) : 0} hidden={hidden} info={info} ticker={ticker} />}
+      {net.id === "mainnet" && <PriceCard holding={snap ? prlToNumber(snap.balance) : 0} hidden={hidden} info={info} ticker={ticker} live={price} />}
       {snap && total === 0 && snap.activity.length === 0 && snap.immature === 0n && (
         <div className="card start">
           <strong>Your wallet is ready</strong>
@@ -1636,6 +1666,17 @@ function Send({ snap, secrets, net, price, reload, preset, onClose, settings }: 
   const [known, setKnown] = useState<string[]>([]);
   const [review, setReview] = useState<core.Plan | null>(null);
   const [ack, setAck] = useState(false);
+  // A first crossing to an Ethereum address (none recorded for it yet): its deposit address must be compared by hand.
+  // Assumed first until the record is read, so that the check is never skipped by a slow read.
+  const [firstCrossing, setFirstCrossing] = useState(true);
+  const [compared, setCompared] = useState(false);
+  useEffect(() => {
+    if (!preset.bridgeTo) return;
+    store
+      .crossings(preset.bridgeTo)
+      .then((l) => setFirstCrossing(!l.some((c) => !c.back)))
+      .catch(() => {});
+  }, [preset.bridgeTo]);
   const [state, setState] = useState<"edit" | "sending" | { txid: string }>("edit");
   const [error, setError] = useState("");
 
@@ -1654,6 +1695,17 @@ function Send({ snap, secrets, net, price, reload, preset, onClose, settings }: 
   const feeKind = preset.combine ? "combine" : preset.bridgeTo ? "bridge" : "send";
   const service = core.serviceFor(net, feeKind);
   const rate = rates[speed];
+  // Max shows the figure it stands for (1.0.6b): everything spendable, less the fees at the chosen speed. Worked out the
+  // way the payment itself will be; until an address is entered, the wallet's own stands in (same size, same fee).
+  const maxPlan = useMemo(() => {
+    if (!max || !snap || !rate) return null;
+    try {
+      const dest = core.isValidAddress(to.trim(), net) ? to.trim() : snap.changeAddr.address;
+      return core.plan(snap, net, dest, "max", rate, service);
+    } catch {
+      return null;
+    }
+  }, [max, snap, rate, to, net.id, feeKind]);
 
   const prepare = () => {
     setError("");
@@ -1673,11 +1725,25 @@ function Send({ snap, secrets, net, price, reload, preset, onClose, settings }: 
   const confirm = async () => {
     if (!snap || !review) return;
     if (preset.bridgeTo && review.amount !== parsePrl(preset.amount ?? "")) return setError("The bridge checked a different amount. Nothing was sent.");
+    if (preset.bridgeTo && firstCrossing && !compared) return setError("Compare the deposit address with pearlbridge.xyz first. Nothing was sent.");
     setState("sending");
     setError("");
     try {
+      if (preset.bridgeTo) {
+        // Asked once more at the moment of paying: the review screen may have stayed open while the bridge paused,
+        // reached today's limit, changed its figures, or named another deposit address. Nothing is sent then.
+        const fresh = await new core.Bridge().quote(review.amount);
+        if (fresh.paused) throw new Error("The bridge is paused right now. Nothing was sent; try again later.");
+        if (!fresh.withinDailyCap) throw new Error("This amount is above what the bridge accepts today. Nothing was sent; try a smaller amount.");
+        if (preset.bridgeNet !== undefined && fresh.net !== preset.bridgeNet) throw new Error("The bridge's figures changed since the check. Nothing was sent; go back to Bridge and check again.");
+        if ((await store.bridgeDepositAddress(preset.bridgeTo, net)) !== review.to) throw new Error("The bridge now names another deposit address than the one you reviewed. Nothing was sent; go back to Bridge and check again.");
+      }
       const txid = await store.pay(secrets, net, snap, review);
-      if (preset.bridgeTo) await store.addCrossing({ txid, eth: preset.bridgeTo, amount: review.amount, at: Date.now() });
+      if (preset.bridgeTo) {
+        await store.addCrossing({ txid, eth: preset.bridgeTo, amount: review.amount, at: Date.now(), need: preset.bridgeNeed, delay: preset.bridgeDelay, then: preset.bridgeThen, net: preset.bridgeNet });
+        // The arrival alert (1.0.6b). The PRL is already sent: a failure here must not look like a failed payment.
+        await store.watchCrossing(txid, false).catch(() => {});
+      }
       setState({ txid });
       reload();
     } catch (e) {
@@ -1730,11 +1796,23 @@ function Send({ snap, secrets, net, price, reload, preset, onClose, settings }: 
             return <Row k="Your PRL after" v={<After from={`${formatPrl(snap.balance, 4)} PRL`} to={`${formatPrl(after < 0n ? 0n : after)} PRL`} />} />;
           })()}
         </dl>
-        {preset.bridgeTo && (
+        {preset.bridgeTo && !firstCrossing && (
           <p className="hint">
-            This is the PearlBridge deposit address for {short(preset.bridgeTo, 6)}. PearlBridge issued it and Keshi cannot verify it: on a first crossing, compare it with the address
-            pearlbridge.xyz shows for your Ethereum address, and start small.
+            This is the PearlBridge deposit address for {short(preset.bridgeTo, 6)}, the one your earlier crossings paid. PearlBridge issued it and Keshi cannot verify it on its own.
           </p>
+        )}
+        {preset.bridgeTo && firstCrossing && (
+          <div className="hint warn">
+            <p>
+              <b>First crossing to {short(preset.bridgeTo, 6)}.</b> PearlBridge issued this deposit address and Keshi cannot verify it on its own. Open pearlbridge.xyz, enter the same Ethereum address, and compare the deposit address it shows with this one, character by character:
+            </p>
+            <p className="addr left mono-wrap">{review.to}</p>
+            <label className="check">
+              <input type="checkbox" checked={compared} onChange={(e) => setCompared(e.target.checked)} />
+              <span>I compared it on pearlbridge.xyz and it is the same address.</span>
+            </label>
+            <p className="small">Start with a small amount. Once a crossing is recorded, Keshi keeps to this address and refuses any other.</p>
+          </div>
         )}
         {(() => {
           if (preset.locked || preset.combine) return null;
@@ -1757,7 +1835,7 @@ function Send({ snap, secrets, net, price, reload, preset, onClose, settings }: 
         )}
         {error && <p className="error" role="alert">{error}</p>}
         <div className="grow" />
-        <button className="btn primary" disabled={state === "sending" || (snap?.protectionChecked === false && !ack)} onClick={confirm}>
+        <button className="btn primary" disabled={state === "sending" || (snap?.protectionChecked === false && !ack) || (!!preset.bridgeTo && firstCrossing && !compared)} onClick={confirm}>
           {state === "sending" ? "Sending…" : "Send payment"}
         </button>
       </div>
@@ -1799,7 +1877,7 @@ function Send({ snap, secrets, net, price, reload, preset, onClose, settings }: 
           <input
             inputMode="decimal"
             placeholder="0.00"
-            value={max ? "Everything" : amount}
+            value={max ? (maxPlan ? formatPrl(maxPlan.amount) : formatPrl(available)) : amount}
             readOnly={max || !!preset.bridgeTo}
             onChange={(e) => setAmount(e.target.value)}
           />
@@ -1822,11 +1900,18 @@ function Send({ snap, secrets, net, price, reload, preset, onClose, settings }: 
         </div>
       </label>
       {price && !max && prlAmount() ? <p className="muted small">{unit === "usd" ? `${formatPrl(prlAmount()!)} PRL at today's price` : usd(prlToNumber(prlAmount()!) * price)}</p> : null}
+      {max && (
+        <p className="muted small">
+          {maxPlan
+            ? `Everything you can send: ${formatPrl(available)} PRL less the network fee (${formatPrl(maxPlan.fee)} PRL)${maxPlan.serviceFee > 0n ? ` and the Keshi fee (${formatPrl(maxPlan.serviceFee)} PRL)` : ""}.${price ? ` About ${usd(prlToNumber(maxPlan.amount) * price)}.` : ""}`
+            : "Everything you can send, less the network fee. The exact amount is on the next screen."}
+        </p>
+      )}
       <div className="field">
         <span>Speed</span>
         <div className="seg">
           {SPEEDS.map((s) => (
-            <button key={s.id} className={speed === s.id ? "on" : ""} onClick={() => setSpeed(s.id)}>
+            <button key={s.id} className={speed === s.id ? "on" : ""} aria-pressed={speed === s.id} onClick={() => setSpeed(s.id)}>
               {s.label}
               <small>{s.note}</small>
               {rates[s.id] && price ? <small>{usd(prlToNumber(BigInt(rates[s.id]! * 154)) * price)}</small> : null}
@@ -1893,24 +1978,28 @@ async function priceSeries(p: { id: string; days: number; minutes: number; limit
 }
 
 /** The PRL price over a chosen period, with how much it moved. Shown on the home screen. */
-function PriceCard({ holding, hidden, info, ticker }: { holding: number; hidden: boolean; info: core.MarketInfo | null; ticker: core.Ticker | null }) {
+function PriceCard({ holding, hidden, info, ticker, live }: { holding: number; hidden: boolean; info: core.MarketInfo | null; ticker: core.Ticker | null; live?: number | null }) {
   // Market cap from the live price and the supply in circulation, like the exchanges show it.
   const cap = info ? (ticker && info.supply ? ticker.last * info.supply : info.marketCap) : null;
   const [period, setPeriod] = useState<(typeof HOME_PERIODS)[number]["id"]>("24H");
-  const [points, setPoints] = useState<core.Point[] | null>(null);
+  const [series, setSeries] = useState<core.Point[] | null>(null);
+  // The curve ends on the price the balance above is valued at (1.0.6): the last candle is a few minutes old, and the
+  // two figures used to differ by a cent. Skipped when the live price is far from the curve: then the sources disagree.
+  const points = useMemo(() => core.withLivePrice(series, live), [series, live]);
   useEffect(() => {
     let alive = true;
-    setPoints(null);
+    setSeries(null);
     const p = HOME_PERIODS.find((x) => x.id === period)!;
     priceSeries(p)
-      .then((r) => alive && setPoints(r.pts))
-      .catch(() => alive && setPoints([]));
+      .then((r) => alive && setSeries(r.pts))
+      .catch(() => alive && setSeries([]));
     return () => {
       alive = false;
     };
   }, [period]);
   const first = points?.[0]?.value, last = points?.[points.length - 1]?.value;
   const move = first && last ? (last - first) / first : null;
+  const worth = !hidden && holding > 0 && first && last ? holding * (last - first) : null;
   return (
     <section className="pricecard">
       <div className="row-head">
@@ -1918,11 +2007,17 @@ function PriceCard({ holding, hidden, info, ticker }: { holding: number; hidden:
         {move !== null && (
           <span className={`delta ${move >= 0 ? "up" : "dn"}`}>
             {move >= 0 ? "+" : ""}
-            {(move * 100).toFixed(2)}%{!hidden && holding > 0 && first && last ? ` (${move >= 0 ? "+" : "-"}${usd(Math.abs(holding * (last - first)))})` : ""}
+            {(move * 100).toFixed(2)}%
           </span>
         )}
       </div>
       <Chart points={points} format={(v) => usd(v)} label="PRL price in dollars" />
+      {worth !== null && (
+        <p className="muted small">
+          Your PRL over this period: {worth >= 0 ? "+" : "-"}
+          {usd(Math.abs(worth))}
+        </p>
+      )}
       <div className="periods wide">
         {HOME_PERIODS.map((p) => (
           <button key={p.id} className={period === p.id ? "on" : ""} onClick={() => setPeriod(p.id)}>
@@ -2158,6 +2253,8 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
 
   const received = route ? (fee ? route.amountOut - (route.amountOut * fee.bips) / 10_000n : route.amountOut) : 0n;
   const short_ = give && giveBal !== null && route ? giveBal < route.amountIn : false;
+  // Selling wPRL without (enough of) it: the one moment the bridge is put forward on this screen.
+  const needWprl = !!meta && !!hold && !nothingOnEth && dir === "buy" && (hold.wprl === 0n || (!!route && short_));
 
   return (
     <>
@@ -2166,7 +2263,7 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
         <div className="grow" />
         <span className="muted small">Uniswap on Ethereum</span>
       </header>
-      <p className="muted small">Swap wPRL and ETH, in both directions. You send and receive plain ETH: Keshi takes care of WETH for you.</p>
+      <p className="muted small">Swap wPRL and ETH, in both directions.</p>
       {!hold && !holdFailed && <p className="muted small">Reading your Ethereum address…</p>}
       {delegate && (
         <p className="hint warn">
@@ -2223,19 +2320,10 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
               You hold <b>{core.formatEth(hold.eth)} ETH</b> and no wPRL yet, so Keshi starts with ETH to wPRL. Switch any time.
             </p>
           )}
-          {hold && hold.wprl === 0n && dir === "buy" && (
-            <div className="card">
-              <p>
-                <b>You have no wPRL yet.</b> wPRL is your PRL on Ethereum. Get it with the bridge, a step that needs no ETH, or buy some with ETH: choose ETH to wPRL.
-              </p>
-              <button className="btn primary" onClick={() => open({ kind: "bridge" })}>
-                Bridge PRL to wPRL
-              </button>
-            </div>
-          )}
           <div className="seg">
             <button
               className={dir === "buy" ? "on" : ""}
+              aria-pressed={dir === "buy"}
               onClick={() => {
                 setDir("buy");
                 setRoute(null);
@@ -2245,6 +2333,7 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
             </button>
             <button
               className={dir === "sell" ? "on" : ""}
+              aria-pressed={dir === "sell"}
               onClick={() => {
                 setDir("sell");
                 setRoute(null);
@@ -2286,9 +2375,19 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
           )}
           {route && get && fee && <p className="muted small">Quote includes a {fee.label} Keshi fee.</p>}
           {route && <SmallSwap valueUsd={prlUsd ? (Number(dir === "buy" ? route.amountIn : received) / 1e8) * prlUsd : null} costUsd={costUsd} />}
-          {route && short_ && dir === "buy" && (
+          {needWprl && (
             <div className="card">
-              <p>Swaps start from wPRL. You have {hold ? formatPrl(hold.wprl) : "0.00"} wPRL: turn PRL into wPRL with the bridge first.</p>
+              <p>
+                {hold!.wprl === 0n ? (
+                  <>
+                    <b>You have no wPRL yet.</b> wPRL is your PRL on Ethereum: the bridge turns PRL into wPRL, and needs no ETH.
+                  </>
+                ) : (
+                  <>
+                    <b>You have {formatPrl(hold!.wprl)} wPRL.</b> For more, turn PRL into wPRL with the bridge first.
+                  </>
+                )}
+              </p>
               <button className="btn primary" onClick={() => open({ kind: "bridge" })}>
                 Bridge PRL to wPRL
               </button>
@@ -2308,7 +2407,7 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
           {lowEth && !noEthForFee && (
             <div className="hint">
               <p>
-                Every swap is an Ethereum transaction, paid in ETH.{costUsd ? ` Right now one swap costs about ${usd(costUsd)}.` : ""} Keep about <b>{reserveText}</b> on your Ethereum address in Keshi, a margin in case fees rise. You have {core.formatEth(hold!.eth)} ETH.
+                A swap is paid in ETH{costUsd ? `: about ${usd(costUsd)} right now` : ""}. Keep about <b>{reserveText}</b> on your Ethereum address. You have {core.formatEth(hold!.eth)} ETH.
               </p>
               {!showEth && (
                 <button className="link" onClick={() => setShowEth(true)}>
@@ -2330,15 +2429,18 @@ function Swap({ secrets, net, price: prlUsd, open, settings, saveSettings }: Ctx
               {busy ? "Working…" : `Swap for ${get?.symbol}`}
             </button>
           )}
-          <p className="muted small">
-            The swap is cancelled if the price moves more than 1% against you, or if it is not confirmed within 20 minutes.
-          </p>
-          <p className="muted small">Uniswap pool fees and Ethereum network fees are set by those networks, not by Keshi. On a small amount they can be a large share of the swap: check the quote before you confirm. A confirmed swap cannot be reversed.</p>
+          <p className="muted small">Cancelled if the price moves more than 1% against you. A confirmed swap cannot be reversed.</p>
+          <details className="explain">
+            <summary>Good to know</summary>
+            <p>You send and receive plain ETH: Keshi takes care of WETH for you.</p>
+            <p>The swap is cancelled if the price moves more than 1% against you, or if it is not confirmed within 20 minutes.</p>
+            <p>Uniswap pool fees and Ethereum network fees are set by those networks, not by Keshi. On a small amount they can be a large share of the swap: check the quote before you confirm.</p>
+          </details>
         </>
       )}
       {!meta && error && <p className="error" role="alert">{error}</p>}
-      {net.id === "mainnet" && !nothingOnEth && (
-        <button className="btn" onClick={() => open({ kind: "bridge" })}>
+      {net.id === "mainnet" && !nothingOnEth && !needWprl && (
+        <button className="btn ghost" onClick={() => open({ kind: "bridge" })}>
           Bridge PRL and wPRL
         </button>
       )}
@@ -2369,12 +2471,24 @@ function Explore() {
   const [mood, setMood] = useState<"all" | core.Mood>("all");
   const [read, setRead] = useState<string[]>([]);
   const [since, setSince] = useState<number | null>(null);
+  // Forks scheduled in Pearl's own code: undefined until read (or when it could not be read), an empty list when none is ahead.
+  const [forks, setForks] = useState<core.UpcomingFork[] | undefined>(undefined);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const list = await core.loadNews();
+      // The newsrooms, and Pearl's first-hand sources (its releases, new exchanges, forks). Either may fail without the other.
+      const memory = await local.get<core.MarketMemory>("newsMarkets").catch(() => undefined);
+      const [news, official] = await Promise.allSettled([core.loadNews(), core.loadOfficial(core.networkById("mainnet").indexer, memory)]);
+      const own = official.status === "fulfilled" ? official.value : null;
+      if (own) {
+        setForks(own.forks);
+        await local.set("newsMarkets", own.markets).catch(() => {});
+        await local.set("newsForks", { at: Date.now(), forks: own.forks ?? null }).catch(() => {});
+      }
+      if (news.status === "rejected" && !own?.items.length) throw news.reason;
+      const list = [...(own?.items ?? []), ...(news.status === "fulfilled" ? news.value : [])].sort((a, b) => b.time - a.time);
       setItems(list);
       setUpdated(Date.now());
       await local.set("newsCache", { at: Date.now(), items: list });
@@ -2399,6 +2513,9 @@ function Explore() {
         setItems(usable.items);
         setUpdated(usable.at);
       }
+      // The fork line of the last reading, while the new one is on its way: an hour at most, a countdown ages fast.
+      const kept = await local.get<{ at: number; forks: core.UpcomingFork[] | null }>("newsForks").catch(() => undefined);
+      if (kept && Array.isArray(kept.forks) && Date.now() - kept.at < 3_600_000) setForks(kept.forks);
       if (!usable || Date.now() - usable.at > 5 * 60_000) void refresh();
     })();
     const id = setInterval(() => void refresh(), 10 * 60_000);
@@ -2435,7 +2552,22 @@ function Explore() {
           {loading ? "Updating…" : "Refresh"}
         </button>
       </header>
-      <p className="muted small">Pearl and Ethereum news from the largest crypto newsrooms, newest first. Each story appears once, even when many sites carry it.</p>
+      <p className="muted small">Pearl and Ethereum news from the largest crypto newsrooms, plus Pearl's own releases and the exchanges where PEARL starts trading. Newest first, each story once.</p>
+      {topic !== "eth" && forks !== undefined && forks.length > 0 && (
+        <div className="hint warn fork-note" role="status">
+          {forks.slice(0, 2).map((f) => (
+            <p key={f.name + f.height}>
+              <b>Pearl fork ahead: {f.name}</b>
+              <br />
+              At block {f.height.toLocaleString("en-US")}, {f.blocksLeft.toLocaleString("en-US")} blocks from now ({core.aboutIn(f.secondsLeft)}, an estimate). Miners and node operators: update before that block.
+            </p>
+          ))}
+          <a href="https://github.com/pearl-research-labs/pearl/releases" target="_blank" rel="noreferrer noopener">
+            Pearl's releases ↗
+          </a>
+        </div>
+      )}
+      {topic !== "eth" && forks !== undefined && forks.length === 0 && <p className="muted small fork-none">No Pearl fork is scheduled in Pearl's code right now.</p>}
       <div className="seg topics">
         {(["prl", "eth", "all"] as const).map((t) => (
           <button key={t} className={topic === t ? "on" : ""} onClick={() => setTopic(t)}>
@@ -2506,11 +2638,11 @@ const VENUE: Record<Venue, { name: string; how: string; site?: string }> = {
   uniswap: { name: "Uniswap", how: "No account needed. Pays in ETH on Ethereum." },
 };
 
-function TradeSheet({ side, secrets, setSecrets, net, snap, price, reload, open, onClose, settings, saveSettings }: Ctx & { side: "buy" | "sell"; setSecrets: (s: core.Secrets) => void; open: (s: Sheet) => void; onClose: () => void }) {
-  const [amount, setAmount] = useState("");
+function TradeSheet({ side, secrets, setSecrets, net, snap, price, reload, open, onClose, settings, saveSettings, presetAmount, presetVenue }: Ctx & { side: "buy" | "sell"; setSecrets: (s: core.Secrets) => void; open: (s: Sheet) => void; onClose: () => void; presetAmount?: string; presetVenue?: "uniswap" }) {
+  const [amount, setAmount] = useState(presetAmount ?? "");
   // Buying has two ways in: USDT already held on another chain, or an exchange.
   const [pay, setPay] = useState<"usdt" | "exchange">("exchange");
-  const [venue, setVenue] = useState<Venue | null>(null);
+  const [venue, setVenue] = useState<Venue | null>(presetVenue ?? null);
   const [prices, setPrices] = useState<Partial<Record<Venue, number>>>({});
   /** Venues whose order book cannot fill the amount: how much they can take. */
   const [thin, setThin] = useState<Partial<Record<Venue, number>>>({});
@@ -2655,12 +2787,12 @@ function TradeSheet({ side, secrets, setSecrets, net, snap, price, reload, open,
     <div className="screen">
       <Header title={`${verb} PRL`} onBack={onClose} />
       {side === "buy" && (
-        <div className="seg paytabs" role="tablist">
-          <button role="tab" aria-selected={pay === "usdt"} className={pay === "usdt" ? "on" : ""} onClick={() => setPay("usdt")}>
+        <div className="seg paytabs" role="tablist" aria-label="How to pay" onKeyDown={groupKeys}>
+          <button role="tab" aria-selected={pay === "usdt"} tabIndex={rove(pay === "usdt")} className={pay === "usdt" ? "on" : ""} onClick={() => setPay("usdt")}>
             Buy with USDT
             <small>Arbitrum · BNB Chain · Polygon</small>
           </button>
-          <button role="tab" aria-selected={pay === "exchange"} className={pay === "exchange" ? "on" : ""} onClick={() => setPay("exchange")}>
+          <button role="tab" aria-selected={pay === "exchange"} tabIndex={rove(pay === "exchange")} className={pay === "exchange" ? "on" : ""} onClick={() => setPay("exchange")}>
             Exchange
             <small>SafeTrade · BigONE · Uniswap</small>
           </button>
@@ -2693,9 +2825,9 @@ function TradeSheet({ side, secrets, setSecrets, net, snap, price, reload, open,
           <h3>{side === "buy" ? "Where to buy" : "Where to sell"}</h3>
           {loading && ranked.length === 0 && <p className="muted small">Getting prices…</p>}
           {!loading && ranked.length === 0 && <p className="hint">No price available right now. Check your connection and try again.</p>}
-          <div className="venues" role="radiogroup" aria-label="Where to trade">
-            {ranked.map((v) => (
-              <button key={v} role="radio" aria-checked={chosen === v} className={chosen === v ? "on" : ""} onClick={() => setVenue(v)}>
+          <div className="venues" role="radiogroup" aria-label="Where to trade" onKeyDown={groupKeys}>
+            {ranked.map((v, i) => (
+              <button key={v} role="radio" aria-checked={chosen === v} tabIndex={rove(chosen ? chosen === v : i === 0)} className={chosen === v ? "on" : ""} onClick={() => setVenue(v)}>
                 <span className="main">
                   <span>
                     {VENUE[v].name}
@@ -3281,6 +3413,7 @@ const PHASE: Record<core.CrossingStatus["phase"], string> = {
   refunded: "Refunded",
   failed: "Failed",
   review: "Held for review by the bridge",
+  unknown: "State not recognized: see PearlBridge",
 };
 
 function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settings, saveSettings }: Ctx & { open: (s: Sheet) => void; onClose: () => void; preset?: string }) {
@@ -3304,14 +3437,53 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
   const [list, setList] = useState<store.Crossing[]>([]);
   const [status, setStatus] = useState<Record<string, core.CrossingStatus>>({});
   const [copied, copy] = useCopy();
+  // 1.0.6b: Pearl confirmations of the crossings on their way, the arrival alert, and "sell it when it arrives".
+  const [confs, setConfs] = useState<Record<string, number>>({});
+  const [alertOn, setAlertOn] = useState(true);
+  const [sellAfter, setSellAfter] = useState(false);
+  const [sale, setSale] = useState<{ eth: bigint; usd: number | null } | "none" | null>(null);
+  const [swapNeed, setSwapNeed] = useState<bigint | null>(null);
+  const [issued, setIssued] = useState<Record<string, bigint>>({});
+  const hidden = !!settings.hideBalance;
+  const status_ = useRef(status);
+  status_.current = status;
 
+  const round = useRef(false);
   const loadList = useCallback(() => {
-    store.crossings(own).then((l) => {
-      setList(l);
-      const b = new core.Bridge();
-      l.slice(0, 8).forEach((c) => (c.back ? b.backStatus(c.txid) : b.status(c.txid)).then((s) => setStatus((m) => ({ ...m, [c.txid]: s }))).catch(() => {}));
-    });
-  }, [own]);
+    // One round at a time: a round still waiting for the bridge is not joined by a second one.
+    if (round.current) return;
+    round.current = true;
+    store
+      .crossings(own)
+      .then((l) => {
+        setList(l);
+        const b = new core.Bridge();
+        const idx = new core.Indexer(net);
+        return Promise.allSettled(
+          l.slice(0, 8).flatMap((c) => {
+            // A crossing that reached its end is not asked about again. One held for review, or in a state Keshi does not know, is.
+            const known = status_.current[c.txid];
+            if (known && core.isFinal(known.phase)) return [];
+            const asks: Promise<unknown>[] = [(c.back ? b.backStatus(c.txid) : b.status(c.txid)).then((s) => setStatus((m) => ({ ...m, [c.txid]: s })))];
+            // How far Pearl is with the payment itself: its confirmations, from Pearl's indexer.
+            if (!c.back) asks.push(idx.tx(c.txid).then((t) => typeof t.confirmations === "number" && t.confirmations >= 0 && setConfs((m) => ({ ...m, [c.txid]: t.confirmations }))));
+            return asks;
+          }),
+        );
+      })
+      .catch(() => {})
+      .finally(() => (round.current = false));
+  }, [own, net.id]);
+  // While a crossing has not reached its end and this screen is open, read again every 30 seconds.
+  const waiting = list.slice(0, 8).some((c) => !status[c.txid] || !core.isFinal(status[c.txid]!.phase));
+  useEffect(() => {
+    if (!waiting || net.id !== "mainnet") return;
+    const t = setInterval(loadList, 30_000);
+    return () => clearInterval(t);
+  }, [waiting, loadList, net.id]);
+  useEffect(() => {
+    store.bridgeAlertOn().then(setAlertOn).catch(() => {});
+  }, []);
   const loadHold = useCallback(() => {
     store.ethHoldings(secrets).then(setHold).catch(() => {});
   }, [secrets]);
@@ -3420,10 +3592,18 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
     }
     setBusy(true);
     setError("");
+    // What was checked, frozen: the payment is opened for exactly this, whatever is typed meanwhile.
+    const dest = eth.trim();
+    const q = quote;
     try {
-      await recheck(quote, false);
-      const address = await store.bridgeDepositAddress(eth.trim(), net);
-      open({ kind: "send", to: address, amount: formatPrl(quote.amount).replace(/,/g, ""), title: "Bridge to Ethereum", bridgeTo: eth.trim(), locked: true });
+      await recheck(q, false);
+      const address = await store.bridgeDepositAddress(dest, net);
+      if (!stillSame() || eth.trim() !== dest) {
+        reset();
+        setBusy(false);
+        return setError("The amount or address changed while the bridge was being asked. Check again.");
+      }
+      open({ kind: "send", to: address, amount: formatPrl(q.amount).replace(/,/g, ""), title: "Bridge to Ethereum", bridgeTo: dest, locked: true, bridgeNeed: q.confirmations, bridgeDelay: q.slow ? q.delaySeconds : 0, bridgeNet: q.net });
     } catch (e) {
       setError(errText(e));
       setBusy(false);
@@ -3440,6 +3620,10 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
     setError("");
     try {
       await recheck(backQuote, true);
+      if (!stillSame()) {
+        reset();
+        return setError("The amount changed while the bridge was being asked. Nothing was sent; check again.");
+      }
       await store.bridgeBack(secrets, backQuote.amount, mine, setStep);
       setDone(`${formatPrl(backQuote.amount)} wPRL sent to the bridge. ${formatPrl(backQuote.net)} PRL will arrive on your Pearl address once Ethereum confirms it.`);
       setBackQuote(null);
@@ -3455,6 +3639,44 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
     }
   };
 
+  // "Sell it when it arrives": what the wPRL of this crossing would fetch on Uniswap right now, Keshi's swap fee taken.
+  const toOwn = eth.trim().toLowerCase() === own.toLowerCase();
+  const saleAsked = useRef(0);
+  useEffect(() => {
+    const my = ++saleAsked.current;
+    setSale(null);
+    if (!quote || !sellAfter || !toOwn || dir !== "out") return;
+    const rpc = new core.EthRpc();
+    core.swapEthNeeded(rpc).then((n) => my === saleAsked.current && setSwapNeed(n)).catch(() => {});
+    Promise.all([core.findRoute(rpc, core.WPRL_CONTRACT, core.WETH, quote.net), core.ethUsdOnUniswap(rpc).catch(() => null)])
+      .then(([route, ethUsd]) => {
+        if (my !== saleAsked.current) return;
+        const keep = 10_000n - (core.swapFee()?.bips ?? 0n);
+        const gets = (route.amountOut * keep) / 10_000n;
+        setSale(gets > 0n ? { eth: gets, usd: ethUsd ? (Number(gets) / 1e18) * ethUsd : null } : "none");
+      })
+      .catch(() => my === saleAsked.current && setSale("none"));
+  }, [quote, sellAfter, toOwn, dir]);
+  const saleNeed = swapNeed ?? core.MIN_SWAP_ETH;
+  const saleEthText = `${core.formatEth(saleNeed + 99_999_999_999_999n, 4)} ETH`;
+  // The crossing asked to be sold on arrival. The bridge's word is not enough: the sale is offered for what Ethereum
+  // itself shows this crossing issued to this address (the wPRL Transfer in the transaction the bridge names), and
+  // never for more than that, than the quote's net amount, or than what is held. Without that proof, no card: wPRL
+  // already held can still be sold from the Sell screen, as what it is.
+  const toSell = list.find((c) => !c.back && status[c.txid]?.phase === "done" && Date.now() - c.at < 3 * 86400_000 && c.eth.toLowerCase() === own.toLowerCase());
+  const mintTx = toSell ? status[toSell.txid]?.ethTx : undefined;
+  useEffect(() => {
+    if (!toSell || !mintTx || issued[toSell.txid] !== undefined) return;
+    const id = toSell.txid;
+    new core.EthRpc()
+      .tokenDelivered(mintTx, core.WPRL_CONTRACT, own)
+      .then((v) => v !== null && v > 0n && setIssued((m) => ({ ...m, [id]: v })))
+      .catch(() => {});
+  }, [toSell?.txid, mintTx, own]);
+  const proven = toSell ? issued[toSell.txid] : undefined;
+  const least = (...v: bigint[]) => v.reduce((a, b) => (b < a ? b : a));
+  const sellNow = toSell && proven && hold && hold.wprl > 0n ? least(hold.wprl, proven, toSell.net ?? toSell.amount) : 0n;
+
   if (net.id !== "mainnet")
     return (
       <div className="screen">
@@ -3469,6 +3691,7 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
       <div className="seg">
         <button
           className={dir === "out" ? "on" : ""}
+          aria-pressed={dir === "out"}
           onClick={() => {
             setDir("out");
             reset();
@@ -3479,6 +3702,7 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
         </button>
         <button
           className={dir === "back" ? "on" : ""}
+          aria-pressed={dir === "back"}
           onClick={() => {
             setDir("back");
             reset();
@@ -3539,6 +3763,29 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
                 Fees take about {share}% of this amount: PearlBridge charges at least 4 PRL per crossing. Under a few hundred PRL, a crossing is rarely worth it.
               </p>
             )}
+            {share < 20 && (() => {
+              const advice = core.bridgeFeeAdvice(quote.amount, quote.fee);
+              return advice?.minimum ? (
+                <p className="hint">
+                  PearlBridge takes its minimum here: {formatPrl(quote.fee)} PRL, {advice.percent}% of this amount.
+                </p>
+              ) : null;
+            })()}
+            {toOwn && (
+              <details className="explain" onToggle={(e) => setSellAfter(e.currentTarget.open)}>
+                <summary>Planning to sell it for ETH afterwards?</summary>
+                <dl className="rows">
+                  <Row k="Then, sold on Uniswap" v={sale === null ? "Asking Uniswap…" : sale === "none" ? "No price right now" : `about ${core.formatEth(sale.eth, 5)} ETH${sale.usd ? ` (${usd(sale.usd)})` : ""}`} />
+                  <Row k="The sale costs" v={`up to about ${saleEthText}, paid in ETH`} />
+                </dl>
+                {hold && hold.eth < saleNeed && (
+                  <p className="hint warn">
+                    The sale is an Ethereum transaction, paid in ETH: your Ethereum address holds {core.formatEth(hold.eth, 4)} ETH. Send about {saleEthText} to it before you sell; until then the wPRL simply waits there.
+                  </p>
+                )}
+                <p className="muted small">An estimate at this minute's price, Keshi's swap fee included. Nothing is sold now: once the wPRL is there, this screen offers to sell it, at the price of that moment.</p>
+              </details>
+            )}
           </>
         );
       })()}
@@ -3596,6 +3843,18 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
         </button>
       )}
 
+      {sellNow > 0n && (
+        <div className="card">
+          <p>
+            <b>Your wPRL arrived:</b> {formatPrl(sellNow)} wPRL, checked on Ethereum.
+          </p>
+          <button className="btn" onClick={() => open({ kind: "trade", side: "sell", amount: formatPrl(sellNow).replace(/,/g, ""), venue: "uniswap" })}>
+            Sell it for ETH on Uniswap
+          </button>
+          <p className="muted small">Optional. Opens the sale with today's price, for you to check and confirm.</p>
+        </div>
+      )}
+      <p className="muted small">{alertOn ? "Keshi notifies you when a crossing arrives, even closed. Settings, Privacy, to turn it off." : "Arrival notifications are off (Settings, Privacy). Your crossings are listed here."}</p>
       {list.length > 0 && (
         <>
           <h3>Your crossings</h3>
@@ -3605,8 +3864,32 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
               return (
                 <li key={c.txid}>
                   <span className="main">
-                    <span>{c.back ? `${formatPrl(c.amount, 4)} wPRL back to PRL` : `${formatPrl(c.amount, 4)} PRL to ${short(c.eth, 4)}`}</span>
-                    <small>{s ? (s.phase === "done" ? (c.back ? "PRL released" : "wPRL issued") : PHASE[s.phase]) : "Checking…"}{s?.detail ? `: ${s.detail}` : ""}</small>
+                    <span>{c.back ? `${hidden ? "•••" : formatPrl(c.amount, 4)} wPRL back to PRL` : `${hidden ? "•••" : formatPrl(c.amount, 4)} PRL to ${short(c.eth, 4)}`}</span>
+                    {(() => {
+                      // On its way to Ethereum: where Pearl's confirmations stand, and about how long is left.
+                      const n = confs[c.txid];
+                      const p = !c.back && s?.phase === "pending" && n !== undefined ? core.crossingProgress(n, c.need ?? 0, c.delay ?? 0, core.TARGET_BLOCK_SECONDS) : null;
+                      if (!p) return <small>{s ? (s.phase === "done" ? (c.back ? "PRL released" : "wPRL issued") : PHASE[s.phase]) : "Checking…"}{s?.detail ? `: ${s.detail}` : ""}</small>;
+                      const count = c.need ? `${p.confirmations} of ${p.need} confirmations` : `${n} confirmation${n === 1 ? "" : "s"}`;
+                      const text =
+                        p.stage === "confirming"
+                          ? c.need && p.secondsLeft !== null
+                            ? `${count} · ${core.aboutLeft(p.secondsLeft)}`
+                            : count
+                          : p.stage === "delay"
+                            ? `${count}. Waiting for PearlBridge, which announced a safety delay for this amount`
+                            : `${count}. Waiting for PearlBridge to issue the wPRL`;
+                      return (
+                        <>
+                          <small>{text}</small>
+                          {c.need ? (
+                            <span className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(p.fraction * 100)} aria-label={`Progress of crossing ${short(c.txid, 4)}`}>
+                              <i style={{ width: `${Math.round(p.fraction * 100)}%` }} />
+                            </span>
+                          ) : null}
+                        </>
+                      );
+                    })()}
                   </span>
                   {(c.back || s?.ethTx) && (
                     <a className="link" href={`https://etherscan.io/tx/${c.back ? c.txid : s!.ethTx}`} target="_blank" rel="noreferrer">
@@ -3622,13 +3905,14 @@ function BridgeSheet({ secrets, net, snap, open, reload, onClose, preset, settin
 
       {!(dir === "back" && shortOfEth) && (
         <EthAddressCard address={own}>
-          <p className="muted small">{hold ? `On it: ${formatPrl(hold.wprl)} wPRL and ${core.formatEth(hold.eth)} ETH.` : "Reading balances…"}</p>
+          <p className="muted small">{hold ? (hidden ? "On it: wPRL and ETH amounts are hidden (Settings, Hide amounts)." : `On it: ${formatPrl(hold.wprl)} wPRL and ${core.formatEth(hold.eth)} ETH.`) : "Reading balances…"}</p>
         </EthAddressCard>
       )}
 
       <details className="explain">
         <summary>How the bridge works</summary>
         <p>wPRL is PRL on Ethereum, one for one. It lets you trade on Uniswap and use Ethereum apps. The bridge is run by PearlBridge, not by Keshi: it holds your PRL for as long as the wPRL exists.</p>
+        <p>PearlBridge has its own terms and risk notice, on pearlbridge.xyz: crossing means accepting them. To carry a crossing out it sees the Pearl and Ethereum addresses you bridge between, as anyone can on the two blockchains.</p>
         <h4>From Pearl to Ethereum</h4>
         <ol>
           <li>You send PRL to a deposit address that belongs to your Ethereum address. This is a normal Pearl payment: no ETH is needed.</li>
@@ -3800,9 +4084,9 @@ function Mining({ snap, secrets, net, price, open, settings }: Ctx & { open: (s:
         <h3>Earnings</h3>
         {stats && stats.allTime > 0n && !hidden && <span className="muted small">All time: {formatPrl(stats.allTime, 2)} PRL</span>}
       </div>
-      <div className="seg mini periods" role="tablist" aria-label="Period">
+      <div className="seg mini periods" role="tablist" aria-label="Period" onKeyDown={groupKeys}>
         {core.PERIODS.map((p) => (
-          <button key={p} role="tab" aria-selected={period === p} className={period === p ? "on" : ""} onClick={() => setPeriod(p)}>
+          <button key={p} role="tab" aria-selected={period === p} tabIndex={rove(period === p)} className={period === p ? "on" : ""} onClick={() => setPeriod(p)}>
             {p}
           </button>
         ))}
@@ -4070,7 +4354,7 @@ function PoolsCard({ status, following, open, testnet, hashrate, net, hidden }: 
       </ul>
       <span className="muted small">
         Follow: your workers and alerts inside Keshi, for pools with a public miner page. Connect: the pool's addresses and your username, ready to paste into your miner. Green dot: the pool's page answered Keshi just now; grey: no answer, which can be the pool, the network or this computer.
-        {hashrate && hashrate > 0 ? " PRL/day: what your hashrate would earn at each pool on today's network, with the fee the pool reported, luck aside." : ""} Cost after luck: the fee the pool reported, plus how the pool's luck ran for everyone over the last days (PPLNS and PROP pools that publish their blocks); a past figure, not a promise. Shown only for pools that reported their fee just now.
+        {hashrate && hashrate > 0 ? " PRL/day: what your hashrate would earn at each pool on today's network, with the fee the pool reported, luck aside. When a pool has two payout schemes with different fees, the lower one is used: with the other scheme you earn a little less than shown." : ""} Cost after luck: the fee the pool reported, plus how the pool's luck ran for everyone over the last days (PPLNS and PROP pools that publish their blocks); a past figure, not a promise. Shown only for pools that reported their fee just now.
       </span>
     </div>
   );
@@ -4087,6 +4371,10 @@ function ConnectSheet({ secrets, net, pool, onClose }: Ctx & { pool: string; onC
   // Only what a miner needs to start is shown; the rest (farther servers, the command line, the options) waits behind More.
   const [more, setMore] = useState(false);
   const r = core.connectFor(pool, own, worker);
+  // Paid in PRL to the Pearl address, or, where the pool offers it, in USDT to the wallet's own Ethereum address.
+  const [payout, setPayout] = useState<"prl" | "usdt">("prl");
+  const ethAddress = useMemo(() => core.ethAccountOf(secrets).address, [secrets]);
+  const usdt = payout === "usdt" && net.id !== "testnet" ? core.connectUsdtFor(pool, ethAddress, worker) : null;
   // The pool's own page, asked once: a dot for the pool, and one per server when the pool says which are up (Peryn does).
   const kind = core.POOL_GUIDE.find((p) => p.name === pool)?.status;
   const [status, setStatus] = useState<core.PoolStatus | null>(null);
@@ -4106,7 +4394,9 @@ function ConnectSheet({ secrets, net, pool, onClose }: Ctx & { pool: string; onC
       </div>
     );
   const c = r.connect;
-  const hasWorker = c.user.includes("WORKER") || c.command.includes("WORKER");
+  const user = usdt ? usdt.user : r.user;
+  const command = usdt ? usdt.command : r.command;
+  const hasWorker = c.user.includes("WORKER") || c.command.includes("WORKER") || !!usdt;
   return (
     <div className="screen">
       <Header title={`Connect to ${c.name}`} onBack={onClose} />
@@ -4117,6 +4407,32 @@ function ConnectSheet({ secrets, net, pool, onClose }: Ctx & { pool: string; onC
             {status ? (status.state === "live" ? `${c.name} answered Keshi just now` : status.state === "coming" ? `${c.name} is not open for mining yet` : `${c.name} did not answer: the pool, the network or this computer`) : `Asking ${c.name}…`}
           </p>
         )}
+        {c.usdt && net.id !== "testnet" && (
+          <div className="card tight">
+            <span className="muted small">Get paid in</span>
+            <div className="seg">
+              <button className={payout === "prl" ? "on" : ""} onClick={() => setPayout("prl")} aria-pressed={payout === "prl"}>
+                PEARL
+              </button>
+              <button className={payout === "usdt" ? "on" : ""} onClick={() => setPayout("usdt")} aria-pressed={payout === "usdt"}>
+                USDT on Ethereum
+              </button>
+            </div>
+            {usdt && (
+              <>
+                <span className="muted small">{c.name} sells the PRL you mine and sends USDT to your Ethereum address in Keshi, every 2 hours from the equivalent of 5 PRL. Keshi holds nothing and takes no fee.</span>
+                <details className="explain">
+                  <summary>How USDT payouts work</summary>
+                  <ul className="muted small bullets">
+                    {usdt.notes.map((n) => (
+                      <li key={n}>{n}</li>
+                    ))}
+                  </ul>
+                </details>
+              </>
+            )}
+          </div>
+        )}
         {hasWorker && (
           <label className="field">
             <span>Worker name</span>
@@ -4125,9 +4441,10 @@ function ConnectSheet({ secrets, net, pool, onClose }: Ctx & { pool: string; onC
         )}
         <div className="card tight">
           <span className="muted small">Username{c.password ? " · password" : ""}</span>
-          <p className="addr left">{r.user}</p>
+          <p className="addr left">{user}</p>
+          {usdt && <span className="muted small">AE- followed by your Ethereum address in Keshi. Check it before you start: a payment sent to a wrong address cannot be recovered.</span>}
           <div className="row gap">
-            <button className="btn" onClick={() => copy(r.user, "user")}>
+            <button className="btn" onClick={() => copy(user, "user")}>
               {copied === "user" ? "Copied" : "Copy username"}
             </button>
             {c.password && (
@@ -4174,8 +4491,8 @@ function ConnectSheet({ secrets, net, pool, onClose }: Ctx & { pool: string; onC
           <>
             <div className="card tight">
               <span className="muted small">{c.miner}, one line to start</span>
-              <p className="addr left mono-wrap">{r.command}</p>
-              <button className="btn" onClick={() => copy(r.command, "cmd")}>
+              <p className="addr left mono-wrap">{command}</p>
+              <button className="btn" onClick={() => copy(command, "cmd")}>
                 {copied === "cmd" ? "Copied" : "Copy command"}
               </button>
             </div>
@@ -4238,12 +4555,12 @@ function MinerSheet({ snap, secrets, net, onClose, preset }: Ctx & { onClose: ()
     try {
       const st = await core.minerState(pool, a);
       setState(st);
-      await save({ pool, address: a, alert: true, afterMinutes: 10 });
+      await save({ pool, address: a, alert: true, afterMinutes: 10, payout: true });
     } catch (e) {
       // A new miner is unknown to the pool until its first accepted share: follow it anyway.
       if (/never seen|\(404\)/i.test(errText(e))) {
         setState({ pool, address: a, hashrate: 0, workers: [], at: Date.now() });
-        await save({ pool, address: a, alert: true, afterMinutes: 10 });
+        await save({ pool, address: a, alert: true, afterMinutes: 10, payout: true });
       } else setError(errText(e));
     }
     setBusy(false);
@@ -4302,6 +4619,7 @@ function MinerSheet({ snap, secrets, net, onClose, preset }: Ctx & { onClose: ()
                           {w.name}
                         </span>
                         {!w.online && <small>{w.lastShare ? `offline, last work ${ago(w.lastShare)}` : "offline"}</small>}
+                        {w.online && workerDetail(w) && <small>{workerDetail(w)}</small>}
                       </span>
                       <span className={`amt ${w.online ? "" : "tone-down"}`}>{core.formatHashrate(w.hashrate)}</span>
                     </li>
@@ -4329,6 +4647,16 @@ function MinerSheet({ snap, secrets, net, onClose, preset }: Ctx & { onClose: ()
                 </div>
               </div>
             </div>
+            <div className="card">
+              <label className="check">
+                <input type="checkbox" checked={!!m.payout} onChange={(e) => save({ ...m, payout: e.target.checked })} />
+                <span>
+                  <b>Alert me when a payment arrives</b>
+                  <br />
+                  <em className="muted">A Chrome notification when PRL arrives on this address, even with Keshi closed or locked, while Chrome is running. Keshi asks Pearl's public indexer once a minute what this address received; only the address is sent. Any PRL sent to it counts, the pool's payouts included.</em>
+                </span>
+              </label>
+            </div>
             <button className="btn" onClick={() => save(null)}>
               Stop following
             </button>
@@ -4344,13 +4672,24 @@ function MinerSheet({ snap, secrets, net, onClose, preset }: Ctx & { onClose: ()
   );
 }
 
+/** What the pool adds about a worker, when it says: card, miner version, and the hashrate the pool measured over 1 h and 24 h. */
+function workerDetail(w: core.Worker): string {
+  const parts: string[] = [];
+  if (w.model) parts.push(w.model);
+  if (w.version) parts.push(w.version);
+  if (w.hashrate1h) parts.push(`1 h ${core.formatHashrate(w.hashrate1h, 0)}`);
+  if (w.hashrate24h) parts.push(`24 h ${core.formatHashrate(w.hashrate24h, 0)}`);
+  return parts.join(" · ");
+}
+
 /** What a hashrate earns on today's network, after electricity, and over the next 30 days as the difficulty grows. */
 function CalcSheet({ snap, net, price, onClose }: Ctx & { onClose: () => void }) {
   const [netState, setNetState] = useState<core.NetworkState | null>(null);
   const [gpu, setGpu] = useState<string>("RTX 4090");
   const [count, setCount] = useState("1");
-  const [hash, setHash] = useState(core.formatHashrate(293e12, 0).replace(" ", " "));
-  const [watts, setWatts] = useState("450");
+  const first = core.GPU_PRESETS.find((x) => x.name === "RTX 4090")!;
+  const [hash, setHash] = useState(core.formatHashrate(first.hashrate, 1).replace(/\.0 /, " "));
+  const [watts, setWatts] = useState(String(first.watts));
   const [kwh, setKwh] = useState("0.20");
   const [fee, setFee] = useState("1");
   useEffect(() => {
@@ -4392,12 +4731,12 @@ function CalcSheet({ snap, net, price, onClose }: Ctx & { onClose: () => void })
           <label className="field">
             <span>Graphics card</span>
             <select value={gpu} onChange={(e) => pick(e.target.value)}>
-              {(["Blackwell", "Hopper", "RTX 50", "RTX 40", "RTX 30"] as const).map((fam) => (
+              {core.GPU_FAMILIES.map((fam) => (
                 <optgroup key={fam} label={fam}>
                   {core.GPU_PRESETS.filter((g) => g.family === fam).map((g) => (
                     <option key={g.name} value={g.name}>
                       {g.name}
-                      {g.unverified ? " (estimate)" : ""}
+                      {g.unverified ? " (power estimated)" : ""}
                     </option>
                   ))}
                 </optgroup>
@@ -4457,7 +4796,7 @@ function CalcSheet({ snap, net, price, onClose }: Ctx & { onClose: () => void })
         {netState && price && (
           <details className="explain">
             <summary>Every card, side by side</summary>
-            <p className="muted small">Net per day for one card at your electricity price ({usd(kwhUsd ?? 0)}/kWh) and pool fee, on today's network. Reference figures from public benchmarks; "estimate" marks cards without one.</p>
+            <p className="muted small">Net per day for one card at your electricity price ({usd(kwhUsd ?? 0)}/kWh) and pool fee, on today's network. Figures measured by Pearl Fortune with its own miner in November 2026: the best case, other miners can give less.</p>
             <ul className="list plain gpus">
               {core.GPU_PRESETS.map((g) => {
                 const e = core.estimate(g.hashrate, g.watts, kwhUsd ?? 0, price, netState, poolFee, growth);
@@ -4466,7 +4805,7 @@ function CalcSheet({ snap, net, price, onClose }: Ctx & { onClose: () => void })
                     <span className="main">
                       <span>
                         {g.name}
-                        {g.unverified && <small className="muted"> · estimate</small>}
+                        {g.unverified && <small className="muted"> · power estimated</small>}
                       </span>
                       <small>
                         {core.formatHashrate(g.hashrate, 0)} · {g.watts} W · {formatPrl(e.prlPerDay, 2)} PRL/day
@@ -4481,7 +4820,7 @@ function CalcSheet({ snap, net, price, onClose }: Ctx & { onClose: () => void })
         )}
         <details className="explain">
           <summary>How this is worked out</summary>
-          <p>Your share of the network's hashrate, times the blocks found in a day, times the reward of a block, minus the pool's fee. Card figures are public benchmarks from October 2026: real hashrates depend on the miner software, the card's settings and its cooling. Prices move; nothing here is a promise.</p>
+          <p>Your share of the network's hashrate, times the blocks found in a day, times the reward of a block, minus the pool's fee. Card figures are those Pearl Fortune measured with its own miner (v2.4.0, November 2026): real hashrates depend on the miner software, the card's settings and its cooling, and are often lower. Prices move; nothing here is a promise.</p>
         </details>
       </div>
     </div>
@@ -4531,6 +4870,87 @@ function OldQuantumAddress({ secrets, net }: { secrets: core.Secrets; net: core.
         </>
       )}
     </li>
+  );
+}
+
+/** Settings > Privacy: the bridge's arrival notification, on unless turned off. */
+function BridgeAlertSetting() {
+  const [on, setOn] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    store.bridgeAlertOn().then(setOn).catch(() => {});
+  }, []);
+  const change = async (next: boolean) => {
+    setOn(next);
+    setError("");
+    try {
+      await store.setBridgeAlert(next);
+    } catch (e) {
+      setOn(!next);
+      setError(`This could not be saved (${errText(e)}).`);
+    }
+  };
+  return (
+    <>
+      <label>
+        Notify me when a bridge crossing arrives
+        <input type="checkbox" checked={on} onChange={(e) => change(e.target.checked)} />
+      </label>
+      <p className="small muted">
+        On by default, and it works with Keshi closed or locked. While a crossing is on its way, Keshi asks PearlBridge about it once a minute. For that, its transaction number (no amount, no address) is kept outside the encrypted storage of this device until it arrives, three days at most. That number is public on the blockchain, where it leads to the amount and the addresses. A notification can be missed (browser closed, notifications turned off): the list on the Bridge screen stays the reference. Turning this off forgets the crossings being watched; turning it back on applies to the crossings you start afterwards.
+      </p>
+      {error && (
+        <p className="hint warn small" role="alert">
+          {error}
+        </p>
+      )}
+    </>
+  );
+}
+
+/** Settings: every Ethereum transaction this wallet signed (permissions included), written down before it left. */
+function EthJournal({ secrets }: { secrets: core.Secrets }) {
+  const [ops, setOps] = useState<store.EthOp[] | null>(null);
+  const address = useMemo(() => core.ethAccountOf(secrets).address, [secrets]);
+  const load = (e: React.SyntheticEvent<HTMLDetailsElement>) => {
+    if (!e.currentTarget.open) return;
+    // Shown at once as recorded, then again once the chain has been asked about those still unknown.
+    store.ethJournal(address, false).then(setOps).catch(() => setOps([]));
+    store.ethJournal(address).then(setOps).catch(() => {});
+  };
+  return (
+    <details className="explain" onToggle={load}>
+      <summary>Ethereum transactions sent by this wallet</summary>
+      <p className="muted small">Every transaction Keshi signed from your Ethereum address, permissions included, written down before it was sent. "Not confirmed yet" means Keshi does not know: it may still go through, so wait before repeating it.</p>
+      {ops === null ? (
+        <p className="muted small">Reading…</p>
+      ) : ops.length === 0 ? (
+        <p className="muted small">None recorded yet. The record starts with Keshi 1.0.6.</p>
+      ) : (
+        <ul className="list plain">
+          {ops.slice(0, 20).map((o) => (
+            <li key={o.hash}>
+              <span className="main">
+                <span>
+                  {o.what} · {o.chain}
+                </span>
+                <small>
+                  {when(Math.floor(o.at / 1000))} · {o.outcome === "confirmed" ? "Confirmed" : o.outcome === "failed" ? "Refused by the network" : "Not confirmed yet"}
+                  {o.nonce !== null ? ` · no. ${o.nonce}` : ""}
+                </small>
+              </span>
+              {o.chain === "Ethereum" ? (
+                <a href={`https://etherscan.io/tx/${o.hash}`} target="_blank" rel="noreferrer noopener">
+                  Etherscan
+                </a>
+              ) : (
+                <small className="muted">{short(o.hash, 6)}</small>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </details>
   );
 }
 
@@ -4686,16 +5106,23 @@ function SettingsTab({ secrets, setSecrets, settings, saveSettings, onLock }: Ct
             Hide amounts
             <input type="checkbox" checked={settings.hideBalance} onChange={(e) => saveSettings({ hideBalance: e.target.checked })} />
           </label>
+          <p className="small muted">Hides your balances on the home screen and in Mining, the amounts of your past crossings in Bridge, and the amounts in notifications. A payment, a quote or a swap you are about to confirm always shows its amounts.</p>
         </li>
       </ul>
       <h4 className="group">Privacy</h4>
       <ul className="menu">
         <li>
+          <CountingSetting />
+        </li>
+        <li>
           <label>
             Check Ethereum automatically
             <input type="checkbox" checked={settings.ethereum} onChange={(e) => saveSettings({ ethereum: e.target.checked })} />
           </label>
-          <p className="small muted">On by default, so ETH and wPRL show on the home screen. When on, the home screen and Activity read your Ethereum address through public servers (Ethereum nodes and Blockscout), which see your IP address. Turn it off to read Ethereum only when you open Swap, Bridge, Buy with USDT or Receive ETH.</p>
+          <p className="small muted">On by default, so ETH and wPRL show on the home screen. When on, the home screen and Activity read your Ethereum address through public servers (Ethereum nodes and Blockscout), which see your IP address. Turn it off to read Ethereum only when you open Swap, Bridge, Buy with USDT or Receive ETH. Opening one of those screens turns this setting back on: turn it off again afterwards if you want it to stay off.</p>
+        </li>
+        <li>
+          <BridgeAlertSetting />
         </li>
         <li>
           <label>
@@ -4705,6 +5132,12 @@ function SettingsTab({ secrets, setSecrets, settings, saveSettings, onLock }: Ct
           <p className="small muted">On by default. Swaps on Ethereum go through Flashbots Protect instead of the public waiting room, so bots cannot see a swap coming and trade around it. A swap that would fail is not included and costs nothing. If Flashbots does not answer, the swap is not sent and you can try again. Plain sends and bridge returns go out the usual way.</p>
         </li>
       </ul>
+      <EthJournal secrets={secrets} />
+      <details className="explain">
+        <summary>Terms of use</summary>
+        <TermsList />
+        <p className="muted small">Questions: contact@keshiwallet.com</p>
+      </details>
       <h4 className="group">Advanced</h4>
       <ul className="menu">
         <li>
@@ -4850,7 +5283,7 @@ function Wallets({ secrets, setSecrets, settings, saveSettings, onClose }: { sec
     setBusy(true);
     try {
       const label = name.trim() || `Wallet ${list.length + 1}`;
-      const next = await store.importWallet(secrets, { name: label, phrase: created, derivation: "pearl" }, pw);
+      const next = await store.importWallet(secrets, { name: label, phrase: created, derivation: "pearl" }, pw, "created");
       setSecrets(next);
       await saveSettings({ wallet: list.length });
       setPw("");
@@ -5593,6 +6026,8 @@ function UsdtBuy({ secrets, net, snap, price, open, onClose, settings, saveSetti
   const quoteGen = useRef(0);
   const [swapNeed, setSwapNeed] = useState<bigint | null>(null);
   const [finishing, setFinishing] = useState("");
+  // Purchases whose arrival was not matched on Ethereum, and that the user asked to swap anyway.
+  const [unmatched, setUnmatched] = useState<Record<string, boolean>>({});
   const [quoting, setQuoting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState("");
@@ -5801,7 +6236,7 @@ function UsdtBuy({ secrets, net, snap, price, open, onClose, settings, saveSetti
     setError("");
     setFinishing(p.txHash);
     try {
-      await store.finishUsdtPurchase(secrets, p, setStep, price);
+      await store.finishUsdtPurchase(secrets, p, setStep, price, !!unmatched[p.txHash]);
       setPurchases(await store.usdtPurchases(core.ethAccountOf(secrets).address));
       store.ethHoldings(secrets).then(setHold).catch(() => {});
     } catch (e) {
@@ -5960,11 +6395,20 @@ function UsdtBuy({ secrets, net, snap, price, open, onClose, settings, saveSetti
                       {p.swapped ? "Swapped for wPRL. Bridge brings it home as PRL." : s ? core.describeStatus(s) : p.outcome ? OUTCOME[p.outcome] : p.done ? "Ended: check Details for the outcome." : Date.now() - p.at > (p.to === "usdt" ? 7 * 24 : 2) * 3600_000 ? "No longer followed here: check Details." : "Checking…"}
                     </small>
                     {p.to === "usdt" && !p.swapped && (p.outcome === "arrived" || (p.outcome === "partial" && p.received !== undefined)) && (
-                      <button className="btn small primary" disabled={!!finishing || busy} onClick={() => finish(p)}>
+                      <button className="btn small primary" disabled={!!finishing || busy || (p.received === undefined && !p.swapping && !unmatched[p.txHash])} onClick={() => finish(p)}>
                         {finishing === p.txHash ? "Swapping…" : p.swapping ? "Check the swap" : hold && hold.usdt > 0n ? `Swap ${core.formatUnits(store.usdtToSwap(p, hold.usdt), 6, 2)} USDT to wPRL` : "Swap to wPRL"}
                       </button>
                     )}
-                    {p.to === "usdt" && !p.swapped && p.outcome === "arrived" && p.received === undefined && <small>Keshi could not match this arrival to a transfer on Ethereum yet: the amount above is what your address holds, up to the quote.</small>}
+                    {p.to === "usdt" && !p.swapped && p.outcome === "arrived" && p.received === undefined && !p.swapping && (
+                      <label className="check">
+                        <input type="checkbox" checked={!!unmatched[p.txHash]} onChange={(e) => setUnmatched((m) => ({ ...m, [p.txHash]: e.target.checked }))} />
+                        <span>
+                          <small>
+                            LI.FI reports this purchase as done, but Keshi could not match it to a transfer on Ethereum. The amount above is USDT your address holds, up to the quote: it may be USDT you already had. Tick to swap it anyway.
+                          </small>
+                        </span>
+                      </label>
+                    )}
                     {p.swapped && (
                       <button className="btn small" onClick={() => open({ kind: "bridge" })}>
                         Bridge wPRL to PRL
@@ -6387,7 +6831,7 @@ function EthSend({ asset, secrets, price, onClose }: Ctx & { asset: EthAssetName
           Amount <em>{have === null ? "reading…" : `${fmt(have)} ${asset} available`}</em>
         </span>
         <div className="with-btn">
-          <input inputMode="decimal" placeholder="0.00" value={max ? "Everything" : amount} readOnly={max} onChange={(e) => setAmount(e.target.value)} />
+          <input inputMode="decimal" placeholder="0.00" value={max ? (have === null ? "" : asset === "ETH" ? core.formatEth(have, 8) : formatPrl(have)) : amount} readOnly={max} onChange={(e) => setAmount(e.target.value)} />
           <button
             className={max ? "on" : ""}
             onClick={() => {
@@ -6400,7 +6844,8 @@ function EthSend({ asset, secrets, price, onClose }: Ctx & { asset: EthAssetName
         </div>
       </label>
       {typed && dollars(typed) !== null ? <p className="muted small">{usd(dollars(typed)!)}</p> : null}
-      {max && asset === "ETH" && <p className="muted small">Everything except the Ethereum fee, which is taken from the same ETH.</p>}
+      {max && asset === "ETH" && <p className="muted small">Everything you hold, less the Ethereum fee, which is taken from the same ETH. The exact amount is on the next screen.</p>}
+      {max && asset !== "ETH" && <p className="muted small">Everything you hold. The Ethereum fee is paid in ETH, on top.</p>}
       {noFee && hold && (
         <GetEth
           address={own}

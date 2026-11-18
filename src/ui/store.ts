@@ -1,6 +1,7 @@
 import * as core from "../core";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { local, session, getSettings, setDataKey, newDataKey, label, syncMinerAlert, type MinerWatch, type Settings, type Site } from "../ext/platform";
+import { noteWallet } from "../ext/stats";
 
 // Everything the screens need from the wallet engine, in one place.
 
@@ -35,6 +36,7 @@ export async function createWallet(phrase: string, password: string, restoring =
   const secrets: core.Secrets = { phrase: first.phrase!, derivation: first.derivation, wallets: entries, dataKey: newDataKey() };
   await local.set("vault", await core.lockVault(secrets, password));
   await remember(secrets);
+  void noteWallet(restoring ? "restored" : "created");
   return secrets;
 }
 
@@ -687,7 +689,7 @@ export async function quoteInscriptionSend(net: core.Network, snap: core.Snapsho
 /* -------------------------------------------------------------- Ethereum sends */
 
 /** Sign and send a prepared Ethereum transfer. Returns its hash at once; it confirms within a minute or two. */
-export async function sendEth(secrets: core.Secrets, p: core.EthSendPlan): Promise<string> {
+async function sendEth_(secrets: core.Secrets, p: core.EthSendPlan): Promise<string> {
   const acct = core.ethAccountOf(secrets);
   try {
     const signed = core.signEthTx(p.tx, acct.privateKey);
@@ -750,6 +752,13 @@ export interface Crossing {
   amount: bigint;
   at: number;
   back?: boolean;
+  /** Confirmations the bridge asked for and its safety delay in seconds, as its quote gave them (1.0.6b): for the progress line. */
+  need?: number;
+  delay?: number;
+  /** The user asked to sell the wPRL on Uniswap once it arrives. */
+  then?: "sell";
+  /** What the bridge's quote said would be issued, fee taken: the most a sale tied to this crossing may offer. */
+  net?: bigint;
 }
 
 export interface EthHoldings {
@@ -786,7 +795,7 @@ export async function ethActivity(secrets: core.Secrets, fresh = false): Promise
 
 /** Swap on Uniswap from the wallet's own Ethereum address. */
 /** Buy an exact amount of wPRL with ETH on Uniswap: one transaction, no permission step, unused ETH refunded. */
-export async function buyWithEth(secrets: core.Secrets, q: core.EthBuy, onStep: (t: string) => void): Promise<string> {
+async function buyWithEth_(secrets: core.Secrets, q: core.EthBuy, onStep: (t: string) => void): Promise<string> {
   try {
     return await core.ethBuy(new core.EthRpc(), core.ethAccountOf(secrets), q, onStep, core.swapFee());
   } catch (e) {
@@ -800,7 +809,7 @@ export async function buyWithEth(secrets: core.Secrets, q: core.EthBuy, onStep: 
  * is not yet allowed to take this amount (permission, then the return itself);
  * one otherwise. The permission is for this exact amount, never unlimited.
  */
-export async function bridgeBack(secrets: core.Secrets, amount: bigint, pearlAddress: string, onStep: (text: string) => void): Promise<string> {
+async function bridgeBack_(secrets: core.Secrets, amount: bigint, pearlAddress: string, onStep: (text: string) => void): Promise<string> {
   if (!core.isValidAddress(pearlAddress, core.networkById("mainnet"))) throw new Error("Refused: the Pearl address for the return is not valid. Nothing was sent.");
   const acct = core.ethAccountOf(secrets);
   const rpc = new core.EthRpc();
@@ -824,6 +833,7 @@ export async function bridgeBack(secrets: core.Secrets, amount: bigint, pearlAdd
     const signed = core.signEthTx(tx, acct.privateKey);
     const hash = await rpc.send(signed.raw, signed.hash);
     await addCrossing({ txid: hash, eth: acct.address, amount, at: Date.now(), back: true });
+    await watchCrossing(hash, true).catch(() => {});
     if (!(await rpc.wait(hash))) throw new Error("Ethereum rejected the return. Your wPRL was not moved; only the Ethereum fee was spent.");
     return hash;
   } catch (e) {
@@ -848,6 +858,18 @@ export async function bridgeDepositAddress(eth: string, net: core.Network): Prom
 
 /** Crossings of one account only: each record carries the Ethereum address it belongs to. */
 export const crossings = async (eth: string): Promise<Crossing[]> => ((await local.get<Crossing[]>("crossings")) ?? []).filter((c) => c.eth.toLowerCase() === eth.toLowerCase());
+/** The arrival alert (1.0.6b): on unless turned off. Turning it off also forgets the crossings it was watching. */
+export const bridgeAlertOn = async (): Promise<boolean> => (await local.get<boolean>("bridgeAlert")) !== false;
+export async function setBridgeAlert(on: boolean): Promise<void> {
+  await local.set("bridgeAlert", on);
+  if (!on) await local.remove("bridgeWatch");
+}
+/** Hands a crossing to the background alert: its transaction number and direction only, kept until it arrives (three days at most). */
+export async function watchCrossing(txid: string, back: boolean): Promise<void> {
+  if (!(await bridgeAlertOn())) return;
+  const list = core.readWatch(await local.get<unknown>("bridgeWatch"), Date.now());
+  await local.set("bridgeWatch", core.readWatch([{ txid, back, at: Date.now() }, ...list.filter((w) => w.txid !== txid)], Date.now()));
+}
 export async function addCrossing(c: Crossing): Promise<void> {
   const all = (await local.get<Crossing[]>("crossings")) ?? [];
   // Up to 30 per account, so a busy account never pushes another one's records out.
@@ -917,7 +939,7 @@ export function purchaseOutcome(s: core.LifiStatus): UsdtPurchase["outcome"] | u
  * step then fails, the permission (for that exact amount, to LI.FI's contract
  * only) stays until a later purchase uses it: the user is told so.
  */
-export async function buyWithUsdt(secrets: core.Secrets, chain: core.SourceChain, q: core.LifiQuote, asked: bigint, onStep: (text: string) => void, leg: "usdt" | "eth" = "usdt"): Promise<string> {
+async function buyWithUsdt_(secrets: core.Secrets, chain: core.SourceChain, q: core.LifiQuote, asked: bigint, onStep: (text: string) => void, leg: "usdt" | "eth" = "usdt"): Promise<string> {
   if (Date.now() - q.at > 5 * core.QUOTE_LIFETIME_MS) throw new Error("This quote has expired. Ask for a fresh one; nothing was sent.");
   // The function that signs checks for itself: the quote must be for this chain and for exactly the USDT the user typed.
   if (q.fromChainId !== chain.chainId || q.tx.chainId !== chain.chainId) throw new Error("Refused: this quote is for another chain. Nothing was sent.");
@@ -1002,13 +1024,20 @@ export async function verifiedArrival(s: core.LifiStatus, from: string, rpc = ne
  * the first step, so none is taken here. `price` is today's PRL price from Keshi's own feeds: a Uniswap
  * price 20% worse is refused, as on the first step.
  */
-export async function finishUsdtPurchase(secrets: core.Secrets, shown: UsdtPurchase, onStep: (t: string) => void, price?: number | null): Promise<string> {
+async function finishUsdtPurchase_(secrets: core.Secrets, shown: UsdtPurchase, onStep: (t: string) => void, price?: number | null, unmatchedOk = false): Promise<string> {
   const acct = core.ethAccountOf(secrets);
   // The stored record, not the one on screen: another window may have swapped it already.
   const p = (await usdtPurchases(acct.address)).find((x) => x.txHash === shown.txHash);
   if (!p || p.to !== "usdt") throw new Error("Unknown purchase.");
   if (p.from.toLowerCase() !== acct.address.toLowerCase()) throw new Error("This purchase belongs to another account.");
   if (p.swapped) throw new Error("This USDT was already swapped for wPRL.");
+  // Checked here too, not only by the screen: the purchase must be recorded as arrived, and when its arrival was
+  // not matched to a transfer on Ethereum, the swap goes ahead only on the user's explicit word, as a swap of
+  // USDT the address holds (still capped at the quote).
+  if (!p.swapping) {
+    if (p.outcome !== "arrived" && !(p.outcome === "partial" && p.received !== undefined)) throw new Error("This purchase is not recorded as arrived yet. Nothing was sent.");
+    if (p.received === undefined && !unmatchedOk) throw new Error("Keshi could not match this purchase to a transfer on Ethereum. Tick the box under it to swap USDT your address holds anyway. Nothing was sent.");
+  }
   const rpc = new core.EthRpc();
   if (p.swapping) {
     // A swap went out earlier: finish its record, or wait for it, rather than send a second one.
@@ -1056,10 +1085,12 @@ export async function ownTxids(net: core.Network): Promise<Set<string>> {
 }
 
 /** Add one or more wallets to the vault. Needs the wallet password, because the vault is re-encrypted. */
-export async function importWallet(secrets: core.Secrets, entries: core.WalletEntry | core.WalletEntry[], password: string): Promise<core.Secrets> {
+export async function importWallet(secrets: core.Secrets, entries: core.WalletEntry | core.WalletEntry[], password: string, kind: "created" | "restored" = "restored"): Promise<core.Secrets> {
   void secrets;
   const list = Array.isArray(entries) ? entries : [entries];
-  return saveSecrets((stored) => list.reduce((s, e) => core.addWallet(s, e), stored), password);
+  const next = await saveSecrets((stored) => list.reduce((s, e) => core.addWallet(s, e), stored), password);
+  void noteWallet(kind);
+  return next;
 }
 
 /** Add the next account of the recovery phrase of wallet `index`, named after the wallet as the user sees it. */
@@ -1132,7 +1163,7 @@ export async function ethTokenBalances(secrets: core.Secrets): Promise<{ meta: c
 }
 
 /** Swap along a Uniswap route from the wallet's own Ethereum address, with the wallet's commission when one is configured. */
-export async function swap(secrets: core.Secrets, route: core.Route, onStep: (t: string) => void, eth = false): Promise<string> {
+async function swap_(secrets: core.Secrets, route: core.Route, onStep: (t: string) => void, eth = false): Promise<string> {
   try {
     return await core.swapRoute(new core.EthRpc(), core.ethAccountOf(secrets), route, onStep, core.swapFee(), 100n, eth);
   } catch (e) {
@@ -1142,7 +1173,7 @@ export async function swap(secrets: core.Secrets, route: core.Route, onStep: (t:
 }
 
 /** Turn WETH on the wallet's Ethereum address back into plain ETH (one Ethereum transaction). */
-export async function unwrapWeth(secrets: core.Secrets, amount: bigint): Promise<string> {
+async function unwrapWeth_(secrets: core.Secrets, amount: bigint): Promise<string> {
   const acct = core.ethAccountOf(secrets);
   const rpc = new core.EthRpc();
   try {
@@ -1155,5 +1186,91 @@ export async function unwrapWeth(secrets: core.Secrets, amount: bigint): Promise
     throw e;
   }
 }
+
+
+/* ------------------------------------------------------------ Ethereum: one operation at a time, and a lasting record */
+
+/** One signed Ethereum (or source-chain) transaction, written down before it leaves. */
+export interface EthOp {
+  hash: string;
+  /** What the user was doing: "Swap", "Bridge wPRL back to PRL", "Buy with USDT"… A permission step is recorded like the rest. */
+  what: string;
+  chain: string;
+  from: string;
+  nonce: number | null;
+  at: number;
+  /** Unset while not known: a transaction that was signed and may or may not have gone out. */
+  outcome?: "confirmed" | "failed";
+}
+
+let current: { what: string; chain: string; from: string } | null = null;
+const busyHere = new Set<string>();
+
+/** Every transaction handed to `EthRpc.send` passes here first: its hash, number and purpose are saved before the network sees it. */
+core.setSendJournal(async (hash, nonce) => {
+  if (!current) return;
+  const all = ((await local.get<EthOp[]>("ethJournal")) ?? []).filter((o) => o.hash !== hash);
+  await local.set("ethJournal", [{ hash, nonce, at: Date.now(), ...current }, ...all].slice(0, 60));
+});
+
+/**
+ * Runs one operation that signs Ethereum transactions, alone: a second Keshi window (or a second tap) asking for
+ * another one from the same address meanwhile is refused, so that two transactions are never prepared with the
+ * same number. The browser's own lock is used, shared by every Keshi window.
+ */
+async function ethTurn<T>(secrets: core.Secrets, what: string, chain: string, run: () => Promise<T>): Promise<T> {
+  const from = core.ethAccountOf(secrets).address;
+  const key = `keshi-eth-${from.toLowerCase()}`;
+  const busy = () => new Error("Keshi is already sending an Ethereum transaction from this wallet, here or in another Keshi window. Wait for it to finish, then try again. Nothing was sent.");
+  const go = async () => {
+    if (busyHere.has(key)) throw busy();
+    busyHere.add(key);
+    current = { what, chain, from };
+    try {
+      return await run();
+    } finally {
+      current = null;
+      busyHere.delete(key);
+    }
+  };
+  const locks = (globalThis as { navigator?: { locks?: { request: (name: string, options: { ifAvailable: boolean }, cb: (lock: unknown) => Promise<T>) => Promise<T> } } }).navigator?.locks;
+  if (!locks?.request) return go();
+  return locks.request(key, { ifAvailable: true }, (lock) => {
+    if (!lock) throw busy();
+    return go();
+  });
+}
+
+/** The record, newest first, for one address; what is still unknown is asked of the chain it was sent on, and remembered once known. */
+export async function ethJournal(address: string, reconcile = true): Promise<EthOp[]> {
+  const all = (await local.get<EthOp[]>("ethJournal")) ?? [];
+  const mine = all.filter((o) => o.from?.toLowerCase() === address.toLowerCase());
+  if (!reconcile) return mine;
+  let changed = false;
+  for (const o of mine.slice(0, 20)) {
+    if (o.outcome || Date.now() - o.at < 20_000) continue;
+    const source = core.SOURCE_CHAINS.find((c) => c.name === o.chain);
+    const ended = await (source ? new core.EthRpc(undefined, source.rpcs) : new core.EthRpc()).outcome(o.hash).catch(() => null);
+    if (ended === null) continue;
+    o.outcome = ended ? "confirmed" : "failed";
+    changed = true;
+  }
+  if (changed) {
+    const fresh = (await local.get<EthOp[]>("ethJournal")) ?? [];
+    await local.set("ethJournal", fresh.map((o) => mine.find((m) => m.hash === o.hash) ?? o)).catch(() => {});
+  }
+  return mine;
+}
+
+export const sendEth = (secrets: core.Secrets, p: core.EthSendPlan): Promise<string> => ethTurn(secrets, "Send", "Ethereum", () => sendEth_(secrets, p));
+export const buyWithEth = (secrets: core.Secrets, q: core.EthBuy, onStep: (t: string) => void): Promise<string> => ethTurn(secrets, "Buy wPRL with ETH", "Ethereum", () => buyWithEth_(secrets, q, onStep));
+export const bridgeBack = (secrets: core.Secrets, amount: bigint, pearlAddress: string, onStep: (text: string) => void): Promise<string> =>
+  ethTurn(secrets, "Bridge wPRL back to PRL", "Ethereum", () => bridgeBack_(secrets, amount, pearlAddress, onStep));
+export const buyWithUsdt = (secrets: core.Secrets, chain: core.SourceChain, q: core.LifiQuote, asked: bigint, onStep: (text: string) => void, leg: "usdt" | "eth" = "usdt"): Promise<string> =>
+  ethTurn(secrets, "Buy with USDT", chain.name, () => buyWithUsdt_(secrets, chain, q, asked, onStep, leg));
+export const finishUsdtPurchase = (secrets: core.Secrets, shown: UsdtPurchase, onStep: (t: string) => void, price?: number | null, unmatchedOk = false): Promise<string> =>
+  ethTurn(secrets, "Swap USDT to wPRL", "Ethereum", () => finishUsdtPurchase_(secrets, shown, onStep, price, unmatchedOk));
+export const swap = (secrets: core.Secrets, route: core.Route, onStep: (t: string) => void, eth = false): Promise<string> => ethTurn(secrets, "Swap", "Ethereum", () => swap_(secrets, route, onStep, eth));
+export const unwrapWeth = (secrets: core.Secrets, amount: bigint): Promise<string> => ethTurn(secrets, "WETH to ETH", "Ethereum", () => unwrapWeth_(secrets, amount));
 
 export type { Settings };

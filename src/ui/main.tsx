@@ -4,5 +4,11 @@ import "@fontsource-variable/hanken-grotesk/wght.css";
 import "./styles.css";
 import { createRoot } from "react-dom/client";
 import { App } from "./app";
+import { TermsGate } from "./terms";
 
-createRoot(document.getElementById("root")!).render(<App />);
+// The terms come once, before the wallet (1.0.6).
+createRoot(document.getElementById("root")!).render(
+  <TermsGate>
+    <App />
+  </TermsGate>,
+);

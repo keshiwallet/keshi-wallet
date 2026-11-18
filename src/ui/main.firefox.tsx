@@ -7,11 +7,14 @@ import { guardNetwork } from "../ext/consent";
 import { createRoot } from "react-dom/client";
 import { App } from "./app";
 import { ConsentGate } from "./consent";
+import { TermsGate } from "./terms";
 
 // Firefox popup: the same wallet as Chrome, behind the data consent screen.
 guardNetwork();
 createRoot(document.getElementById("root")!).render(
   <ConsentGate>
-    <App />
+    <TermsGate>
+      <App />
+    </TermsGate>
   </ConsentGate>,
 );

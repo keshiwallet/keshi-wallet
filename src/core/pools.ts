@@ -165,6 +165,12 @@ export interface Worker {
   online: boolean;
   /** Unix seconds the worker connected, when the pool says: a fresh connection ramps up and is not a drop. */
   since?: number;
+  /** Hashrate the pool measured from accepted shares over the last hour and the last 24 hours, when it says. */
+  hashrate1h?: number;
+  hashrate24h?: number;
+  /** Graphics card and miner version as the miner reported them, when the pool passes them on. */
+  model?: string;
+  version?: string;
 }
 
 export interface MinerState {
@@ -381,8 +387,47 @@ async function pearlhash(address: string, fetcher: Fetch, now: number): Promise<
 }
 
 /**
+ * One Pearl Fortune worker, as /connections answered on 16 November 2026 for an address with 221 rigs:
+ * { worker, sessions: [{ authorized, stale, connected_at, last_stats_at, reported_hashrate,
+ * client_info: { version, gpus: [{ model, count }] }, pool: { last_share_at } }],
+ * pool: { hashrate_1h, hashrate_24h, partial_1h, partial_24h } }.
+ * The hashrate shown is what the miner reports on its live sessions; the pool's own 1 h figure stands in
+ * when the miner reports none. The flat fields of the earlier reading are kept as a fallback.
+ */
+function pearlfortuneWorker(x: any): Worker {
+  const name = cleanName(x.worker_name ?? x.name ?? x.worker ?? x.id);
+  const sessions: any[] = Array.isArray(x.sessions) ? x.sessions.filter((s: unknown) => s && typeof s === "object").slice(0, 64) : [];
+  if (sessions.length === 0 && (x.pool === undefined || x.pool === null)) {
+    const hashrate = Math.max(0, num(x.hashrate ?? x.hashrate_1h ?? x.effective_hashrate));
+    const lastShare = Math.max(0, seconds(x.last_share ?? x.last_share_at ?? x.last_seen ?? x.last_seen_at ?? x.lastShare ?? x.updated_at));
+    return { name, hashrate, lastShare, online: x.online !== false };
+  }
+  const live = sessions.filter((s) => s.authorized !== false && s.stale !== true);
+  const pool = x.pool && typeof x.pool === "object" ? x.pool : {};
+  // A figure below zero is not a hashrate: read as none, so that no sum, average or alert is fed a negative.
+  const rate = (v: unknown) => Math.max(0, num(v));
+  const h1 = pool.partial_1h === true ? 0 : rate(pool.hashrate_1h);
+  const h24 = pool.partial_24h === true ? 0 : rate(pool.hashrate_24h);
+  const reported = Math.min(1e27, live.reduce((sum, s) => sum + rate(s.reported_hashrate), 0));
+  const lastShare = sessions.reduce((t, s) => Math.max(t, seconds(s.pool?.last_share_at) || seconds(s.last_stats_at) || 0), 0);
+  const since = live.reduce((t, s) => { const c = seconds(s.connected_at); return c > 0 && (t === 0 || c < t) ? c : t; }, 0);
+  const info = (live[0] ?? sessions[0])?.client_info;
+  const gpu = Array.isArray(info?.gpus) ? info.gpus.find((g: any) => g && typeof g.model === "string") : undefined;
+  const model = gpu ? cleanName(String(gpu.model).replace(/^NVIDIA GeForce /, "").replace(/^AMD Radeon /, "")) : undefined;
+  const version = typeof info?.version === "string" && info.version ? cleanName(info.version).slice(0, 16) : undefined;
+  const online = live.length > 0;
+  const w: Worker = { name, hashrate: online ? reported || h1 : 0, lastShare, online };
+  if (since > 0) w.since = since;
+  if (h1 > 0) w.hashrate1h = h1;
+  if (h24 > 0) w.hashrate24h = h24;
+  if (model && model !== "worker") w.model = model;
+  if (version && version !== "worker") w.version = version;
+  return w;
+}
+
+/**
  * Pearl Fortune, from the pages its Address Lookup reads (pearlfortune.org/api/v1, as they
- * answered on 4 November 2026): the rolling hashrate of the address, the workers connected,
+ * answered on 4 November 2026; the worker list as it answered on 16 November 2026): the rolling hashrate of the address, the workers connected,
  * the balance from the ledger, and the fee of the address's own payment mode (PPS or PPLNS).
  */
 async function pearlfortune(address: string, fetcher: Fetch, now: number): Promise<MinerState> {
@@ -401,11 +446,7 @@ async function pearlfortune(address: string, fetcher: Fetch, now: number): Promi
   const h24 = rolling.find((r) => r && num(r.hours) === 24);
   const workersKnown = conn !== undefined && Array.isArray(conn?.data?.workers);
   const list: any[] = (workersKnown ? conn.data.workers : []).filter((x: unknown) => x && typeof x === "object");
-  const workers: Worker[] = list.slice(0, WORKERS_MAX).map((x) => {
-    const hashrate = num(x.hashrate ?? x.hashrate_1h ?? x.effective_hashrate);
-    const lastShare = seconds(x.last_share ?? x.last_share_at ?? x.last_seen ?? x.last_seen_at ?? x.lastShare ?? x.updated_at);
-    return { name: cleanName(x.worker_name ?? x.name ?? x.worker ?? x.id), hashrate, lastShare, online: x.online !== false };
-  });
+  const workers: Worker[] = list.slice(0, WORKERS_MAX).map((x) => pearlfortuneWorker(x));
   const feeRate = num(mode?.data?.bridge?.payment_mode === "pps" ? mode?.data?.bridge?.pps_fee_rate : d.pending_shares?.pending_fee_quote?.rate);
   const bal = ledger?.data?.balance_atomic;
   return {
@@ -575,31 +616,62 @@ export function formatHashrate(h: number, digits = 1): string {
   return `${h.toFixed(h >= 100 ? 0 : digits)} ${units[i]}`;
 }
 
-/** Reference figures per card, from pool device pages and public benchmarks (October 2026). Indicative only. */
+/**
+ * Reference figures per card: hashrate and power as Pearl Fortune measured them with its own miner
+ * (pearl-miner v2.4.0, github.com/pearlfortune/pearl-miner, November 2026). They are the best case of one
+ * miner; another miner, other settings or poorer cooling give less. Indicative only.
+ */
+export const GPU_FAMILIES = ["Blackwell", "Hopper", "RTX 50", "RTX 40", "RTX 30", "RTX 20", "Datacenter"] as const;
 export interface GpuPreset {
   name: string;
-  family: "Blackwell" | "Hopper" | "RTX 50" | "RTX 40" | "RTX 30";
+  family: (typeof GPU_FAMILIES)[number];
   hashrate: number;
   watts: number;
-  /** No public benchmark found yet: shown with a note, never as a promise. */
+  /** The benchmark gives no power figure for this card: the watts are an estimate. */
   unverified?: boolean;
 }
 
-/** Reference figures per card, from pool device pages and public benchmarks (October 2026). Indicative only. */
 export const GPU_PRESETS: GpuPreset[] = [
-  { name: "NVIDIA B200", family: "Blackwell", hashrate: 1.2e15, watts: 950 },
-  { name: "NVIDIA H100", family: "Hopper", hashrate: 0.75e15, watts: 700, unverified: true },
-  { name: "RTX 5090", family: "RTX 50", hashrate: 400e12, watts: 525 },
-  { name: "RTX 5080", family: "RTX 50", hashrate: 230e12, watts: 340, unverified: true },
-  { name: "RTX 5070 Ti", family: "RTX 50", hashrate: 170e12, watts: 300, unverified: true },
-  { name: "RTX 4090", family: "RTX 40", hashrate: 293e12, watts: 450 },
-  { name: "RTX 4080", family: "RTX 40", hashrate: 159e12, watts: 260 },
-  { name: "RTX 4070", family: "RTX 40", hashrate: 125e12, watts: 145 },
-  { name: "RTX 4060", family: "RTX 40", hashrate: 65e12, watts: 110 },
-  { name: "RTX 3090", family: "RTX 30", hashrate: 125e12, watts: 330 },
-  { name: "RTX 3080", family: "RTX 30", hashrate: 107e12, watts: 160 },
-  { name: "RTX 3070", family: "RTX 30", hashrate: 72e12, watts: 120 },
-  { name: "RTX 3060", family: "RTX 30", hashrate: 44e12, watts: 110 },
+  { name: "NVIDIA B200", family: "Blackwell", hashrate: 1454.4e12, watts: 982 },
+  { name: "RTX PRO 6000 Blackwell", family: "Blackwell", hashrate: 453.3e12, watts: 500 },
+  { name: "RTX PRO 5000 Blackwell", family: "Blackwell", hashrate: 306.2e12, watts: 350 },
+  { name: "NVIDIA H100", family: "Hopper", hashrate: 820.8e12, watts: 698 },
+  { name: "NVIDIA H200", family: "Hopper", hashrate: 807.0e12, watts: 692 },
+  { name: "RTX 5090", family: "RTX 50", hashrate: 436.8e12, watts: 507 },
+  { name: "RTX 5080", family: "RTX 50", hashrate: 246.8e12, watts: 271 },
+  { name: "RTX 5070 Ti", family: "RTX 50", hashrate: 205.8e12, watts: 243 },
+  { name: "RTX 5070", family: "RTX 50", hashrate: 144.5e12, watts: 200 },
+  { name: "RTX 5060 Ti", family: "RTX 50", hashrate: 111.5e12, watts: 145 },
+  { name: "RTX 5060", family: "RTX 50", hashrate: 87.7e12, watts: 101 },
+  { name: "RTX 5050", family: "RTX 50", hashrate: 60.4e12, watts: 73 },
+  { name: "RTX 4090", family: "RTX 40", hashrate: 348.4e12, watts: 438 },
+  { name: "RTX 4080 SUPER", family: "RTX 40", hashrate: 219.4e12, watts: 267 },
+  { name: "RTX 4080", family: "RTX 40", hashrate: 222.7e12, watts: 306 },
+  { name: "RTX 4070 Ti SUPER", family: "RTX 40", hashrate: 188.2e12, watts: 225 },
+  { name: "RTX 4070 Ti", family: "RTX 40", hashrate: 170.4e12, watts: 206 },
+  { name: "RTX 4070 SUPER", family: "RTX 40", hashrate: 155.5e12, watts: 185 },
+  { name: "RTX 4070", family: "RTX 40", hashrate: 125.2e12, watts: 127 },
+  { name: "RTX 4060 Ti", family: "RTX 40", hashrate: 91.6e12, watts: 108 },
+  { name: "RTX 4060", family: "RTX 40", hashrate: 64.4e12, watts: 110, unverified: true },
+  { name: "RTX 3090 Ti", family: "RTX 30", hashrate: 143.6e12, watts: 288 },
+  { name: "RTX 3090", family: "RTX 30", hashrate: 141.1e12, watts: 333 },
+  { name: "RTX 3080 Ti", family: "RTX 30", hashrate: 144.5e12, watts: 278 },
+  { name: "RTX 3080", family: "RTX 30", hashrate: 124.8e12, watts: 260 },
+  { name: "RTX 3070 Ti", family: "RTX 30", hashrate: 90.5e12, watts: 194 },
+  { name: "RTX 3070", family: "RTX 30", hashrate: 82.6e12, watts: 158 },
+  { name: "RTX 3060 Ti", family: "RTX 30", hashrate: 67.7e12, watts: 134 },
+  { name: "RTX 3060", family: "RTX 30", hashrate: 53.5e12, watts: 163 },
+  { name: "RTX 3050", family: "RTX 30", hashrate: 42.4e12, watts: 130 },
+  { name: "RTX 2080 Ti", family: "RTX 20", hashrate: 110.0e12, watts: 240 },
+  { name: "RTX 2080 SUPER", family: "RTX 20", hashrate: 89.6e12, watts: 210 },
+  { name: "RTX 2080", family: "RTX 20", hashrate: 81.8e12, watts: 186 },
+  { name: "RTX 2070 SUPER", family: "RTX 20", hashrate: 73.3e12, watts: 200 },
+  { name: "RTX 2070", family: "RTX 20", hashrate: 60.3e12, watts: 162 },
+  { name: "RTX 2060 SUPER", family: "RTX 20", hashrate: 52.5e12, watts: 110 },
+  { name: "RTX 2060", family: "RTX 20", hashrate: 48.8e12, watts: 130 },
+  { name: "NVIDIA L40S", family: "Datacenter", hashrate: 320.5e12, watts: 350 },
+  { name: "NVIDIA A100 80GB", family: "Datacenter", hashrate: 282.4e12, watts: 398 },
+  { name: "NVIDIA CMP 170HX", family: "Datacenter", hashrate: 179.9e12, watts: 190 },
 ];
 
 /** The pools miners use, as a guide: fee and scheme as each pool publishes them (October 2026), checked in the app only when a pool answers. */
@@ -939,6 +1011,11 @@ export interface PoolConnect {
   command: string;
   /** The pool's own setup page. */
   guide: string;
+  /**
+   * When the pool can pay in USDT on Ethereum instead of PRL (PearlHash's Auto-Exchange, as its guide
+   * described it on 11 November 2026): the username and command with ETHADDRESS and WORKER as placeholders.
+   */
+  usdt?: { user: string; command: string; notes: string[]; guide: string };
 }
 
 /**
@@ -975,10 +1052,21 @@ export const POOL_CONNECT: PoolConnect[] = [
     ],
     user: "ADDRESS",
     password: "x",
-    options: ["WildRig Multi 0.51.6 or newer is the miner PearlHash recommends; its dev fee is 0% on this pool.", "The worker name goes in the miner's own worker option, or after a dot in the username."],
+    options: ["WildRig Multi is the miner PearlHash recommends (0.52.1 or newer is its most efficient so far); its dev fee is 0% on this pool.", "The worker name goes in the miner's own worker option, or after a dot in the username."],
     miner: "WildRig Multi",
     command: "wildrig-multi --algo pearlhash --url stratum+ssl://pool.pearlhash.xyz:9443 --user ADDRESS.WORKER --pass x",
     guide: "https://pearlhash.xyz/hiveos",
+    usdt: {
+      user: "AE-ETHADDRESS",
+      command: "wildrig-multi --algo pearlhash --url pool.pearlhash.xyz:9000 --user AE-ETHADDRESS --worker WORKER",
+      notes: [
+        "PearlHash sells the PRL you mine and sends USDT (ERC-20) to your Ethereum address in Keshi. You need no exchange account, and Keshi holds nothing and takes no fee.",
+        "Paid in batches once you are owed the equivalent of 5 PRL; PearlHash's guide promises no fixed time. A small balance, or a small batch for the whole pool, waits for a later payout.",
+        "PearlHash's auto-exchange service fee is 0% for now; that is separate from the pool's own mining fee, which still applies. The exchange's trading fee and the Ethereum network fee are taken from what you receive, at the market rate of each exchange.",
+        "The USDT shows on Keshi's home screen, under Ethereum. Follow reads Pearl addresses only: see each exchange on PearlHash's lookup page with this username.",
+      ],
+      guide: "https://pearlhash.xyz",
+    },
   },
   {
     name: "HeroMiners",
@@ -1009,11 +1097,17 @@ export const POOL_CONNECT: PoolConnect[] = [
   {
     name: "Pearl Fortune",
     endpoints: [
-      { label: "Third-party miners", host: "global.pearlfortune.org", port: 8888 },
-      { label: "Official pearl-miner", host: "global.pearlfortune.org", port: 443 },
+      { label: "Global, third-party miners", host: "global.pearlfortune.org", port: 8888 },
+      { label: "Japan, third-party miners", host: "jp.pearlfortune.org", port: 8888 },
+      { label: "Global, official pearl-miner", host: "global.pearlfortune.org", port: 443 },
+      { label: "Japan, official pearl-miner", host: "jp.pearlfortune.org", port: 443 },
     ],
     user: "ADDRESS",
-    options: ["PPS (fee 4%) or PPLNS (fee 2%): chosen per address on pearlfortune.org.", "The official pearlfortune/pearl-miner takes --address and --worker; third-party miners use port 8888."],
+    options: [
+      "PPS (fee 4%) is the default. For PPLNS (fee 2%), ask the pool's administrators: the mode is set per address.",
+      "The official pearlfortune/pearl-miner takes --address and --worker and uses port 443; third-party miners use port 8888.",
+      "Keep the protocol of each miner's example as the pool's guide writes it: some miners fail when switched to SSL.",
+    ],
     miner: "SRBMiner-MULTI",
     command: "SRBMiner-MULTI --disable-cpu --algorithm pearlhash --pool global.pearlfortune.org:8888 --wallet ADDRESS",
     guide: "https://pearlfortune.org/#faq",
@@ -1057,17 +1151,27 @@ export const POOL_CONNECT: PoolConnect[] = [
     name: "Peryn",
     endpoints: [
       { label: "Europe (Frankfurt)", host: "pool.peryn.ai", port: 3333, tlsPort: 3443 },
-      { label: "US East (New York)", host: "us-east.pool.peryn.ai", port: 3333, tlsPort: 3443 },
-      { label: "US West (San Francisco)", host: "us-west.pool.peryn.ai", port: 3333, tlsPort: 3443 },
-      { label: "South America (São Paulo)", host: "sao-paulo.pool.peryn.ai", port: 3333, tlsPort: 3443 },
-      { label: "Southeast Asia (Singapore)", host: "singapore.pool.peryn.ai", port: 3333, tlsPort: 3443 },
       { label: "Hong Kong", host: "hk.pool.peryn.ai", port: 3333, tlsPort: 3443 },
-      { label: "Japan (Tokyo)", host: "tokyo.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "US Central (Chicago)", host: "us.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "Russia (St Petersburg)", host: "st-petersburg.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "US East (New York)", host: "us-east.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "US West (Silicon Valley)", host: "us-west.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "Canada (Toronto)", host: "toronto.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "South America (São Paulo)", host: "sao-paulo.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "Argentina (Buenos Aires)", host: "buenos-aires.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "Chile (Santiago)", host: "santiago.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "Eastern Europe (Warsaw)", host: "warsaw.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "Russia (Moscow)", host: "moscow.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "Middle East (Tel Aviv)", host: "tel-aviv.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "South Africa (Johannesburg)", host: "johannesburg.pool.peryn.ai", port: 3333, tlsPort: 3443 },
       { label: "India (Mumbai)", host: "mumbai.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "Southeast Asia (Singapore)", host: "singapore.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "Japan (Tokyo)", host: "tokyo.pool.peryn.ai", port: 3333, tlsPort: 3443 },
+      { label: "Australia (Sydney)", host: "sydney.pool.peryn.ai", port: 3333, tlsPort: 3443 },
     ],
     user: "ADDRESS.WORKER",
     password: "x",
-    options: ["PPS+ is the default. For PPLNS, use x;mode=pplns as the password.", "Peryn also has its own miner and installer: see the guide below.", "Paid every 2 hours from 1 PRL."],
+    options: ["PPS+ is the default. For PPLNS, use x;mode=pplns as the password.", "Peryn also has its own miner and installer: see the guide below. Peryn Miner takes no dev fee on Peryn Pool, and 1% on other pools.", "Paid every 2 hours from 1 PRL."],
     miner: "SRBMiner-MULTI",
     command: "SRBMiner-MULTI --disable-cpu --algorithm pearlhash --pool pool.peryn.ai:3333 --wallet ADDRESS.WORKER --password x",
     guide: "https://peryn.ai/mine",
@@ -1084,6 +1188,15 @@ export function connectFor(name: string, address: string, worker = "rig01"): { u
   const w = cleanWorker(worker);
   const fill = (s: string) => s.replace(/ADDRESS/g, address).replace(/WORKER/g, w);
   return { user: fill(c.user), command: fill(c.command), connect: c };
+}
+
+/** The same for a payout in USDT: the pool's username and command for this Ethereum address, or null when the pool has no such payout or the address is not one. */
+export function connectUsdtFor(name: string, ethAddress: string, worker = "rig01"): { user: string; command: string; notes: string[]; guide: string } | null {
+  const u = POOL_CONNECT.find((p) => p.name === name)?.usdt;
+  if (!u || !/^0x[0-9a-fA-F]{40}$/.test(ethAddress)) return null;
+  const w = cleanWorker(worker);
+  const fill = (s: string) => s.replace(/ETHADDRESS/g, ethAddress).replace(/WORKER/g, w);
+  return { user: fill(u.user), command: fill(u.command), notes: u.notes, guide: u.guide };
 }
 
 /* ----------------------------------------------------------- real cost */

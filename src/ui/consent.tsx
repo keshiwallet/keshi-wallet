@@ -73,7 +73,10 @@ export function ConsentGate({ children }: { children: ReactNode }) {
 
           <section>
             <h2>Never sent</h2>
-            <p>Your recovery phrase, private keys and password stay on this device. No analytics, no tracking, no ads, no technical data.</p>
+            <p>
+              Your recovery phrase, private keys and password stay on this device. No tracking and no ads. Keshi counts its wallets only if you
+              answer yes when it asks, two screens from here: one anonymous signal a day, with no address and no identifier. It is off unless you say yes.
+            </p>
           </section>
 
           <section>

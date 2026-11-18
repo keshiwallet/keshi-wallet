@@ -320,6 +320,11 @@ export function decodeBridgeData(data: string): BridgeData {
  * the bridge sends; no swap is a call on the USDT contract itself. A plain bridge call must send that USDT.
  * Throws with the reason when the transaction says otherwise.
  */
+export const SOURCE_SWAP_REFUSED = "This route first swaps your USDT on the starting chain, through an exchange whose instructions Keshi cannot read. Keshi does not sign it. Nothing was sent: try another amount, or another chain.";
+/** Off: Keshi signs only routes that bridge the USDT itself. Turned on in tests alone, to keep the swap checks exercised. */
+let ALLOW_SOURCE_SWAPS = false;
+export const allowSourceSwapsForTests = (on: boolean) => void (ALLOW_SOURCE_SWAPS = on);
+
 export function checkSourceSwaps(inside: BridgeData, usdt: string, fromAmount: bigint): void {
   const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
   if (!inside.swaps) {
@@ -336,6 +341,9 @@ export function checkSourceSwaps(inside: BridgeData, usdt: string, fromAmount: b
     if (i > 0 && (!same(sw.sendingAssetId, inside.swaps[i - 1]!.receivingAssetId) || sw.requiresDeposit)) throw new Error("LI.FI's swaps do not follow one another. Nothing was sent.");
   }
   if (!same(inside.swaps[inside.swaps.length - 1]!.receivingAssetId, inside.sendingAssetId)) throw new Error("LI.FI's transaction would bridge a token other than the one its swap yields. Nothing was sent.");
+  // Since 1.0.6 (external audit): what each swap hands to its exchange is bytes Keshi cannot read, so even a route
+  // whose swaps pass every check above is not signed. Only a route that bridges the USDT itself is.
+  if (!ALLOW_SOURCE_SWAPS) throw new Error(SOURCE_SWAP_REFUSED);
 }
 
 /** Reads LI.FI's answer into the few figures the wallet shows. Throws on anything that would be unsafe to sign. */
